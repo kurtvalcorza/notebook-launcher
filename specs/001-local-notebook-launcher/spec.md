@@ -8,6 +8,12 @@
 
 **Input**: User description: "Create a local, Colab-like launcher for user-trusted public GitHub notebooks. The user should be able to open, run, edit, save, stop, and reopen a persistent local copy; optionally use a local GPU; and let MCP-capable agents inspect, edit, execute, diagnose, and repair the same notebook session. The feature must never commit, push, create branches, or otherwise modify GitHub."
 
+## Clarifications
+
+### Session 2026-09-15
+
+- Q: When a user approves a GitHub source as trusted, should that trust apply only to the exact resolved commit, or to the whole repository? → A: The trust prompt offers both choices: trust this exact commit or trust this repository for future revisions.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Open a Trusted GitHub Notebook Locally (Priority: P1)
@@ -22,8 +28,10 @@ As a user, I can open a public GitHub notebook locally from its notebook referen
 
 1. **Given** a valid public GitHub notebook reference, **When** the user launches it, **Then** the exact requested notebook opens in a local notebook session.
 2. **Given** a mutable source reference such as a branch or tag, **When** launch begins, **Then** the session records the exact immutable source revision used.
-3. **Given** a source revision that has not yet been trusted locally, **When** execution would begin, **Then** the user must explicitly approve that revision before repository-supplied code or setup instructions run.
-4. **Given** the user declines trust, **When** the request is cancelled, **Then** no notebook code or repository-supplied setup is executed.
+3. **Given** a source that is not covered by an existing local trust decision, **When** execution would begin, **Then** the user is offered two trust scopes: trust the exact resolved commit or trust the repository for future revisions.
+4. **Given** the user selects exact-commit trust, **When** that same commit is launched again, **Then** the prior trust decision is reused, while a different commit requires a new decision unless repository-wide trust was later granted.
+5. **Given** the user selects repository-wide trust, **When** a future revision from that same repository is launched, **Then** the prior repository trust decision is reused without another source-trust prompt.
+6. **Given** the user cancels or declines trust, **When** the request is cancelled, **Then** no notebook code or repository-supplied setup is executed.
 
 ---
 
@@ -139,7 +147,8 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - The supplied source points to a directory, issue, pull request, raw non-notebook file, or another unsupported target.
 - The requested notebook or source revision no longer exists.
 - A source reference changes after it has been resolved for a launch.
-- The user declines the trust prompt for a new source revision.
+- The user cancels the trust prompt for a source not covered by an existing trust decision.
+- Repository-wide trust exists and a later repository revision is launched; the stored repository trust decision applies.
 - A working notebook is renamed or moved within the allowed workspace.
 - A Save a Copy destination already exists or is outside the allowed destination scope.
 - The local workspace or output storage runs out of disk space.
@@ -157,49 +166,50 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 
 - **FR-001**: The system MUST accept a supported public GitHub notebook reference and open the exact requested notebook locally.
 - **FR-002**: The system MUST record the exact immutable source revision used for each fresh remote-source workspace.
-- **FR-003**: The system MUST require an explicit local trust decision before executing a source revision that has not previously been approved under the local trust policy.
-- **FR-004**: Declining trust MUST prevent repository-supplied notebook code and setup instructions from executing.
-- **FR-005**: A fresh remote-source launch MUST create a new persistent workspace by default rather than silently reuse a prior edited workspace.
-- **FR-006**: Each workspace MUST retain source provenance separately from the editable working copy.
-- **FR-007**: Notebook edits, saved cell outputs, workspace files, and generated artifacts MUST persist after the active execution session stops.
-- **FR-008**: Users MUST be able to reopen an existing workspace without resetting its working copy from the remote source.
-- **FR-009**: Users MUST be able to save a distinct copy of the current notebook within an allowed persistent destination.
-- **FR-010**: Save a Copy MUST preserve an existing destination unless overwrite is explicitly requested.
-- **FR-011**: The feature MUST NOT commit, push, create branches, or otherwise modify the remote GitHub repository.
-- **FR-012**: The feature MUST NOT require or inject GitHub write credentials for ordinary notebook launch, workspace use, or agent operation.
-- **FR-013**: Notebook dependencies declared by the source project MUST be usable without relying on unrelated packages installed in the user's host Python environment.
-- **FR-014**: Reopening or relaunching an unchanged source environment SHOULD reuse previously prepared reusable artifacts when available.
-- **FR-015**: The default agent capability profile MUST permit notebook-cell inspection, insertion, editing, deletion, and execution within the current workspace.
-- **FR-016**: A read-only agent profile MUST permit inspection but MUST reject code execution and all notebook or workspace mutation.
-- **FR-017**: Agent operations MUST use the same active notebook workspace and execution state visible to the user rather than creating an unrelated hidden notebook runtime.
-- **FR-018**: Whole-notebook agent execution MUST process code cells in notebook order and stop on the first execution error by default.
-- **FR-019**: Cell execution failures MUST identify the failing cell and provide actionable error context while leaving the session usable when the execution environment itself remains healthy.
-- **FR-020**: Long-running agent execution MUST provide a timeout or cancellation path.
-- **FR-021**: Stopping a notebook session MUST invalidate active agent attachment while preserving the persistent workspace.
-- **FR-022**: Users MUST be able to choose automatic GPU use, required GPU use, or CPU-only execution.
-- **FR-023**: Required GPU mode MUST fail clearly when a supported usable GPU is unavailable rather than silently switching to CPU.
-- **FR-024**: Interactive and agent-driven execution in the same session MUST observe the same compute capability and workspace state.
-- **FR-025**: Local execution MUST be isolated from unrelated host resources by default and MUST expose only the workspace and resources explicitly granted by the user.
-- **FR-026**: Host credentials, unrelated host directories, local management interfaces, and other notebook sessions MUST NOT be exposed by default.
-- **FR-027**: The standard isolation mode MUST be presented as defense-in-depth for user-trusted repositories, not as a guarantee for arbitrary adversarial code.
-- **FR-028**: The system MUST reject unsupported remote hosts, malformed notebook references, path traversal outside allowed scopes, and cross-session agent attachment attempts.
-- **FR-029**: User-controlled source, path, session, and permission values MUST be treated as data and MUST NOT become executable host command text.
-- **FR-030**: Outbound network access from the notebook session MAY be allowed by default for package, model, and data retrieval, while inbound exposure MUST remain local to the user's machine unless explicitly configured otherwise.
-- **FR-031**: No additional host data directory MUST be exposed by default.
-- **FR-032**: Users MAY explicitly grant one selected local directory to a workspace as read-only or read-write persistent data storage.
-- **FR-033**: A remote notebook reference MUST NOT be able to select, replace, or broaden the host data directory grant.
-- **FR-034**: The entire home directory MUST NOT be granted automatically merely for convenience.
-- **FR-035**: The system MUST provide a persistent output area for generated files and artifacts that is not removed when the execution session stops.
-- **FR-036**: The system MUST expose clear launch/session status and actionable, secret-safe failure information.
-- **FR-037**: Agent attachment and execution activity MUST produce bounded audit metadata sufficient to identify the workspace/session, operation, timing, and success or failure without copying complete notebook content into logs by default.
-- **FR-038**: Permission enforcement for writable and read-only agent profiles MUST occur at the launcher/agent-control boundary and MUST NOT rely only on agent instructions or prompt compliance.
-- **FR-039**: A read-only agent MUST NOT be able to promote itself to writable access without a new explicit local authorization decision.
-- **FR-040**: Persistent workspace data MUST remain until the user explicitly deletes or replaces it; stopping an execution session MUST NOT be treated as workspace deletion.
+- **FR-003**: Before executing a source not covered by an existing local trust decision, the system MUST offer the user two persistent trust scopes: trust the exact resolved commit, or trust the repository for future revisions.
+- **FR-004**: Cancelling or declining the trust prompt MUST prevent repository-supplied notebook code and setup instructions from executing.
+- **FR-005**: Exact-commit trust MUST apply only to the approved immutable commit; repository-wide trust MUST apply to future revisions from the same repository until that local trust decision is changed or removed.
+- **FR-006**: A fresh remote-source launch MUST create a new persistent workspace by default rather than silently reuse a prior edited workspace.
+- **FR-007**: Each workspace MUST retain source provenance separately from the editable working copy.
+- **FR-008**: Notebook edits, saved cell outputs, workspace files, and generated artifacts MUST persist after the active execution session stops.
+- **FR-009**: Users MUST be able to reopen an existing workspace without resetting its working copy from the remote source.
+- **FR-010**: Users MUST be able to save a distinct copy of the current notebook within an allowed persistent destination.
+- **FR-011**: Save a Copy MUST preserve an existing destination unless overwrite is explicitly requested.
+- **FR-012**: The feature MUST NOT commit, push, create branches, or otherwise modify the remote GitHub repository.
+- **FR-013**: The feature MUST NOT require or inject GitHub write credentials for ordinary notebook launch, workspace use, or agent operation.
+- **FR-014**: Notebook dependencies declared by the source project MUST be usable without relying on unrelated packages installed in the user's host Python environment.
+- **FR-015**: Reopening or relaunching an unchanged source environment SHOULD reuse previously prepared reusable artifacts when available.
+- **FR-016**: The default agent capability profile MUST permit notebook-cell inspection, insertion, editing, deletion, and execution within the current workspace.
+- **FR-017**: A read-only agent profile MUST permit inspection but MUST reject code execution and all notebook or workspace mutation.
+- **FR-018**: Agent operations MUST use the same active notebook workspace and execution state visible to the user rather than creating an unrelated hidden notebook runtime.
+- **FR-019**: Whole-notebook agent execution MUST process code cells in notebook order and stop on the first execution error by default.
+- **FR-020**: Cell execution failures MUST identify the failing cell and provide actionable error context while leaving the session usable when the execution environment itself remains healthy.
+- **FR-021**: Long-running agent execution MUST provide a timeout or cancellation path.
+- **FR-022**: Stopping a notebook session MUST invalidate active agent attachment while preserving the persistent workspace.
+- **FR-023**: Users MUST be able to choose automatic GPU use, required GPU use, or CPU-only execution.
+- **FR-024**: Required GPU mode MUST fail clearly when a supported usable GPU is unavailable rather than silently switching to CPU.
+- **FR-025**: Interactive and agent-driven execution in the same session MUST observe the same compute capability and workspace state.
+- **FR-026**: Local execution MUST be isolated from unrelated host resources by default and MUST expose only the workspace and resources explicitly granted by the user.
+- **FR-027**: Host credentials, unrelated host directories, local management interfaces, and other notebook sessions MUST NOT be exposed by default.
+- **FR-028**: The standard isolation mode MUST be presented as defense-in-depth for user-trusted repositories, not as a guarantee for arbitrary adversarial code.
+- **FR-029**: The system MUST reject unsupported remote hosts, malformed notebook references, path traversal outside allowed scopes, and cross-session agent attachment attempts.
+- **FR-030**: User-controlled source, path, session, and permission values MUST be treated as data and MUST NOT become executable host command text.
+- **FR-031**: Outbound network access from the notebook session MAY be allowed by default for package, model, and data retrieval, while inbound exposure MUST remain local to the user's machine unless explicitly configured otherwise.
+- **FR-032**: No additional host data directory MUST be exposed by default.
+- **FR-033**: Users MAY explicitly grant one selected local directory to a workspace as read-only or read-write persistent data storage.
+- **FR-034**: A remote notebook reference MUST NOT be able to select, replace, or broaden the host data directory grant.
+- **FR-035**: The entire home directory MUST NOT be granted automatically merely for convenience.
+- **FR-036**: The system MUST provide a persistent output area for generated files and artifacts that is not removed when the execution session stops.
+- **FR-037**: The system MUST expose clear launch/session status and actionable, secret-safe failure information.
+- **FR-038**: Agent attachment and execution activity MUST produce bounded audit metadata sufficient to identify the workspace/session, operation, timing, and success or failure without copying complete notebook content into logs by default.
+- **FR-039**: Permission enforcement for writable and read-only agent profiles MUST occur at the launcher/agent-control boundary and MUST NOT rely only on agent instructions or prompt compliance.
+- **FR-040**: A read-only agent MUST NOT be able to promote itself to writable access without a new explicit local authorization decision.
+- **FR-041**: Persistent workspace data MUST remain until the user explicitly deletes or replaces it; stopping an execution session MUST NOT be treated as workspace deletion.
 
 ### Key Entities *(include if feature involves data)*
 
 - **Remote Notebook Source**: The public GitHub repository, requested reference, notebook path, and immutable source revision used to establish provenance.
-- **Trust Decision**: The user's local approval or rejection of executing a specific previously unseen source revision.
+- **Trust Decision**: The user's local approval scope for executing a remote source, recorded either for one exact immutable commit or for the repository and its future revisions; cancelling leaves no trust grant.
 - **Workspace**: Persistent local state for one launched source, including provenance, editable files, notebook copies, outputs, and workspace preferences.
 - **Working Notebook**: The editable local notebook opened and saved by the user and agent; it is separate from immutable source provenance.
 - **Output Artifact**: A persistent file produced by notebook execution, such as a model, table, image, checkpoint, report, or exported data file.
@@ -222,7 +232,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - **SC-008**: In the security acceptance suite, unsupported sources, path traversal, cross-session attachment, prohibited host-resource access, and command-injection attempts are rejected or remain outside the granted execution scope.
 - **SC-009**: Stopping an active session invalidates agent access and releases disposable execution resources while preserving the tested workspace contents and reusable prepared artifacts.
 - **SC-010**: An explicitly granted local data folder exposes only the selected folder at the requested access level; unrelated host directories remain unavailable through the feature.
-- **SC-011**: For an unseen source revision, execution does not begin until the user approves it; rejecting the prompt results in zero repository-supplied notebook or setup execution.
+- **SC-011**: For a source not covered by prior trust, execution does not begin until the user selects exact-commit trust or repository-wide trust; cancelling the prompt results in zero repository-supplied notebook or setup execution.
 - **SC-012**: A user can complete the primary source-to-open, edit/run, agent-assist, stop, and reopen workflow without performing Git write operations or managing notebook-server credentials manually.
 
 ## Assumptions
@@ -231,6 +241,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - WSL2/Linux is the first supported local execution environment; native Linux remains an intended compatible target.
 - Public GitHub repositories are sufficient for the MVP; private-repository authentication is out of scope.
 - Users decide which public repositories they trust enough to execute locally; public availability alone does not imply trust.
+- Exact-commit and repository-wide trust decisions are stored locally and can be changed or removed by the user.
 - The user's supported GPU environment, when used, is configured before GPU-specific acceptance testing.
 - Internet access is normally available for source retrieval and notebook-required packages, models, or data.
 - Persistent workspaces are stored locally and remain until the user explicitly deletes them.
