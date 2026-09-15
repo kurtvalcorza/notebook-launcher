@@ -4,6 +4,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+from uuid import uuid4
 
 
 SCHEMA = """
@@ -14,6 +15,23 @@ CREATE TABLE IF NOT EXISTS launch_authorization_replay (
     jti_hash TEXT PRIMARY KEY,
     request_digest TEXT NOT NULL,
     consumed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS launches (
+    id TEXT PRIMARY KEY,
+    request_digest TEXT NOT NULL,
+    repository_id INTEGER,
+    commit_sha TEXT,
+    notebook_path TEXT,
+    workspace_id TEXT,
+    gpu TEXT NOT NULL CHECK (gpu IN ('auto','on','off')),
+    agent_mode TEXT NOT NULL CHECK (agent_mode IN ('write','readonly')),
+    trust_covered INTEGER NOT NULL CHECK (trust_covered IN (0,1)),
+    state TEXT NOT NULL CHECK (
+        state IN ('pending_trust','authorized','starting','ready','failed','stopped')
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS trust_records (
@@ -179,3 +197,51 @@ class StateStore:
         except sqlite3.IntegrityError:
             return False
         return True
+
+    def create_launch(
+        self,
+        *,
+        request_digest: str,
+        repository_id: int | None,
+        commit_sha: str | None,
+        notebook_path: str | None,
+        workspace_id: str | None,
+        gpu: str,
+        agent_mode: str,
+        trust_covered: bool,
+        state: str,
+        now: str,
+    ) -> str:
+        launch_id = str(uuid4())
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO launches (
+                    id, request_digest, repository_id, commit_sha,
+                    notebook_path, workspace_id, gpu, agent_mode,
+                    trust_covered, state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    launch_id,
+                    request_digest,
+                    repository_id,
+                    commit_sha,
+                    notebook_path,
+                    workspace_id,
+                    gpu,
+                    agent_mode,
+                    int(trust_covered),
+                    state,
+                    now,
+                    now,
+                ),
+            )
+        return launch_id
+
+    def get_launch(self, launch_id: str) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM launches WHERE id = ?",
+                (launch_id,),
+            ).fetchone()
