@@ -14,6 +14,7 @@
 
 - Q: When a user approves a GitHub source as trusted, should that trust apply only to the exact resolved commit, or to the whole repository? → A: The trust prompt offers both choices: trust this exact commit or trust this repository for future revisions.
 - Q: If the user and an attached agent edit the same notebook or cell at nearly the same time, how should the launcher handle the conflict? → A: Detect stale/conflicting edits and require refresh/retry rather than silently overwriting either edit.
+- Q: In the default writable agent mode, should the agent be allowed to modify any file inside the persistent workspace, or only notebook files and designated output files? → A: The writable agent may modify any file inside the persistent workspace; host paths outside the workspace remain protected unless explicitly granted.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -73,6 +74,7 @@ As a user of an MCP-capable coding agent, I can attach the agent to the same not
 6. **Given** an agent reconnects after a client disconnect, **When** the notebook session is still active, **Then** the same workspace and current notebook state remain available.
 7. **Given** the notebook session has stopped, **When** an agent attempts to reconnect, **Then** the attachment is rejected rather than creating an orphan execution environment.
 8. **Given** the user and agent both attempt to save edits derived from different versions of the same notebook or cell, **When** a stale/conflicting write is detected, **Then** the later stale write is rejected and the editor must refresh/retry rather than silently overwrite the other change.
+9. **Given** the default writable agent profile, **When** the agent creates, edits, renames, or deletes files inside the persistent workspace, **Then** those changes are permitted subject to normal workspace conflict and persistence rules, while paths outside the workspace remain unavailable unless explicitly granted.
 
 ---
 
@@ -103,7 +105,7 @@ As a user, I can run a trusted public notebook with a constrained local executio
 
 **Acceptance Scenarios**:
 
-1. **Given** a normal launch, **When** the notebook runs, **Then** only the workspace and explicitly granted local resources are available to it by default.
+1. **Given** a normal writable launch, **When** the notebook or agent operates, **Then** the persistent workspace is writable but unrelated host resources remain unavailable unless explicitly granted.
 2. **Given** no explicit local data grant, **When** the notebook runs, **Then** the user's home directory, credentials, unrelated files, and local management interfaces are not implicitly exposed.
 3. **Given** a remote GitHub source, **When** notebook or agent activity occurs, **Then** the feature does not commit, push, create branches, or otherwise modify GitHub.
 4. **Given** malformed paths, unsupported sources, or cross-session attachment attempts, **When** they are submitted, **Then** they are rejected before they can widen the allowed execution scope.
@@ -152,6 +154,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - The user cancels the trust prompt for a source not covered by an existing trust decision.
 - Repository-wide trust exists and a later repository revision is launched; the stored repository trust decision applies.
 - The user and agent save conflicting edits based on different notebook/cell versions; the stale write is rejected and must be refreshed/retried.
+- A writable agent creates, changes, renames, or deletes non-notebook files inside the persistent workspace; those operations follow the same persistence and conflict rules as other workspace changes.
 - A working notebook is renamed or moved within the allowed workspace.
 - A Save a Copy destination already exists or is outside the allowed destination scope.
 - The local workspace or output storage runs out of disk space.
@@ -209,16 +212,17 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - **FR-040**: A read-only agent MUST NOT be able to promote itself to writable access without a new explicit local authorization decision.
 - **FR-041**: Persistent workspace data MUST remain until the user explicitly deletes or replaces it; stopping an execution session MUST NOT be treated as workspace deletion.
 - **FR-042**: Notebook/cell mutations MUST use conflict detection so a stale user or agent edit cannot silently overwrite a newer saved edit; conflicting writes MUST be rejected and require refresh/retry.
+- **FR-043**: In the default writable profile, the agent MUST be permitted to create, read, modify, rename, and delete files anywhere inside the persistent workspace, subject to workspace conflict/persistence rules; this permission MUST NOT implicitly extend to host paths outside the workspace or explicitly granted local data.
 
 ### Key Entities *(include if feature involves data)*
 
 - **Remote Notebook Source**: The public GitHub repository, requested reference, notebook path, and immutable source revision used to establish provenance.
 - **Trust Decision**: The user's local approval scope for executing a remote source, recorded either for one exact immutable commit or for the repository and its future revisions; cancelling leaves no trust grant.
-- **Workspace**: Persistent local state for one launched source, including provenance, editable files, notebook copies, outputs, and workspace preferences.
+- **Workspace**: Persistent local state for one launched source, including provenance, editable files, notebook copies, outputs, and workspace preferences; writable mode treats the full workspace as mutable state.
 - **Working Notebook**: The editable local notebook opened and saved by the user and agent; it is separate from immutable source provenance and has a current saved version used for conflict detection.
 - **Output Artifact**: A persistent file produced by notebook execution, such as a model, table, image, checkpoint, report, or exported data file.
 - **Notebook Session**: The disposable active execution context for a workspace; it may be stopped and recreated without deleting workspace data.
-- **Agent Capability Profile**: The effective permission set for an attached agent, including the default writable profile and the read-only inspection profile.
+- **Agent Capability Profile**: The effective permission set for an attached agent, including the default writable profile with full workspace write access and the read-only inspection profile.
 - **Local Data Grant**: An optional explicit user-selected local directory and its read-only or read-write access mode.
 - **Agent Activity Record**: Sanitized metadata describing an agent attachment or execution operation without storing full notebook contents by default.
 
@@ -239,6 +243,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - **SC-011**: For a source not covered by prior trust, execution does not begin until the user selects exact-commit trust or repository-wide trust; cancelling the prompt results in zero repository-supplied notebook or setup execution.
 - **SC-012**: A user can complete the primary source-to-open, edit/run, agent-assist, stop, and reopen workflow without performing Git write operations or managing notebook-server credentials manually.
 - **SC-013**: In a concurrent-edit acceptance test, 100% of stale conflicting notebook/cell writes are rejected rather than silently overwriting the newer saved version.
+- **SC-014**: In writable-mode acceptance testing, the agent can mutate representative notebook and non-notebook files inside the workspace while equivalent attempts against unrelated host paths are denied unless the user explicitly granted those paths.
 
 ## Assumptions
 
