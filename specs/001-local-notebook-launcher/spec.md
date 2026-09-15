@@ -15,6 +15,7 @@
 - Q: When a user approves a GitHub source as trusted, should that trust apply only to the exact resolved commit, or to the whole repository? → A: The trust prompt offers both choices: trust this exact commit or trust this repository for future revisions.
 - Q: If the user and an attached agent edit the same notebook or cell at nearly the same time, how should the launcher handle the conflict? → A: Detect stale/conflicting edits and require refresh/retry rather than silently overwriting either edit.
 - Q: In the default writable agent mode, should the agent be allowed to modify any file inside the persistent workspace, or only notebook files and designated output files? → A: The writable agent may modify any file inside the persistent workspace; host paths outside the workspace remain protected unless explicitly granted.
+- Q: Should a single persistent workspace allow more than one active notebook session at the same time, or only one active session per workspace? → A: Only one active notebook session is allowed per workspace.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -145,6 +146,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 1. **Given** a launch in progress, **When** the user checks status, **Then** the current high-level phase and any actionable failure reason are visible.
 2. **Given** an active session, **When** the user stops it, **Then** active execution and agent attachment are invalidated while persistent workspace contents remain.
 3. **Given** a stopped workspace, **When** the user reopens it, **Then** a new execution session starts against the existing working copy.
+4. **Given** a workspace already has an active notebook session, **When** the user attempts to start another session for that same workspace, **Then** the launcher does not create a second active session; it identifies the existing session and requires that session to be reused or stopped before a new one can start.
 
 ### Edge Cases
 
@@ -155,6 +157,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - Repository-wide trust exists and a later repository revision is launched; the stored repository trust decision applies.
 - The user and agent save conflicting edits based on different notebook/cell versions; the stale write is rejected and must be refreshed/retried.
 - A writable agent creates, changes, renames, or deletes non-notebook files inside the persistent workspace; those operations follow the same persistence and conflict rules as other workspace changes.
+- A second session-start request arrives while the workspace already has an active session; no second runtime is created for that workspace.
 - A working notebook is renamed or moved within the allowed workspace.
 - A Save a Copy destination already exists or is outside the allowed destination scope.
 - The local workspace or output storage runs out of disk space.
@@ -213,15 +216,16 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - **FR-041**: Persistent workspace data MUST remain until the user explicitly deletes or replaces it; stopping an execution session MUST NOT be treated as workspace deletion.
 - **FR-042**: Notebook/cell mutations MUST use conflict detection so a stale user or agent edit cannot silently overwrite a newer saved edit; conflicting writes MUST be rejected and require refresh/retry.
 - **FR-043**: In the default writable profile, the agent MUST be permitted to create, read, modify, rename, and delete files anywhere inside the persistent workspace, subject to workspace conflict/persistence rules; this permission MUST NOT implicitly extend to host paths outside the workspace or explicitly granted local data.
+- **FR-044**: A workspace MUST have at most one active notebook session at a time; a request to start another session for an already-active workspace MUST reuse or direct the user to the existing session, or require it to stop before a replacement session is created.
 
 ### Key Entities *(include if feature involves data)*
 
 - **Remote Notebook Source**: The public GitHub repository, requested reference, notebook path, and immutable source revision used to establish provenance.
 - **Trust Decision**: The user's local approval scope for executing a remote source, recorded either for one exact immutable commit or for the repository and its future revisions; cancelling leaves no trust grant.
-- **Workspace**: Persistent local state for one launched source, including provenance, editable files, notebook copies, outputs, and workspace preferences; writable mode treats the full workspace as mutable state.
+- **Workspace**: Persistent local state for one launched source, including provenance, editable files, notebook copies, outputs, and workspace preferences; writable mode treats the full workspace as mutable state and owns at most one active notebook session.
 - **Working Notebook**: The editable local notebook opened and saved by the user and agent; it is separate from immutable source provenance and has a current saved version used for conflict detection.
 - **Output Artifact**: A persistent file produced by notebook execution, such as a model, table, image, checkpoint, report, or exported data file.
-- **Notebook Session**: The disposable active execution context for a workspace; it may be stopped and recreated without deleting workspace data.
+- **Notebook Session**: The disposable active execution context for a workspace; exactly zero or one may be active for a workspace at a time, and it may be stopped and recreated without deleting workspace data.
 - **Agent Capability Profile**: The effective permission set for an attached agent, including the default writable profile with full workspace write access and the read-only inspection profile.
 - **Local Data Grant**: An optional explicit user-selected local directory and its read-only or read-write access mode.
 - **Agent Activity Record**: Sanitized metadata describing an agent attachment or execution operation without storing full notebook contents by default.
@@ -244,6 +248,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - **SC-012**: A user can complete the primary source-to-open, edit/run, agent-assist, stop, and reopen workflow without performing Git write operations or managing notebook-server credentials manually.
 - **SC-013**: In a concurrent-edit acceptance test, 100% of stale conflicting notebook/cell writes are rejected rather than silently overwriting the newer saved version.
 - **SC-014**: In writable-mode acceptance testing, the agent can mutate representative notebook and non-notebook files inside the workspace while equivalent attempts against unrelated host paths are denied unless the user explicitly granted those paths.
+- **SC-015**: In workspace-lifecycle acceptance testing, repeated start requests cannot produce more than one active notebook session for the same workspace.
 
 ## Assumptions
 
