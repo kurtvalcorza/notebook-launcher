@@ -45,8 +45,27 @@ class TrustStore:
         )
 
     def grant(self, source: ResolvedSource, scope: TrustScope) -> UUID:
+        return self.grant_identity(
+            repository_id=source.repository_id,
+            repository_node_id=source.repository_node_id,
+            owner=source.owner,
+            repository=source.repository,
+            commit_sha=source.commit_sha,
+            scope=scope,
+        )
+
+    def grant_identity(
+        self,
+        *,
+        repository_id: int,
+        repository_node_id: str | None,
+        owner: str,
+        repository: str,
+        commit_sha: str,
+        scope: TrustScope,
+    ) -> UUID:
         trust_id = uuid4()
-        commit_sha = source.commit_sha if scope is TrustScope.EXACT_COMMIT else None
+        scoped_commit = commit_sha if scope is TrustScope.EXACT_COMMIT else None
         with self.state.transaction() as conn:
             conn.execute(
                 """
@@ -58,12 +77,12 @@ class TrustStore:
                 """,
                 (
                     str(trust_id),
-                    source.repository_id,
-                    source.repository_node_id,
-                    source.owner,
-                    source.repository,
+                    repository_id,
+                    repository_node_id,
+                    owner,
+                    repository,
                     scope.value,
-                    commit_sha,
+                    scoped_commit,
                     datetime.now(UTC).isoformat(),
                 ),
             )

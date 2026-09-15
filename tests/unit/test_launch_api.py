@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import json
 import re
+from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 
@@ -41,13 +42,13 @@ def make_client(tmp_path: Path):
         state=state,
         token_codec=LaunchTokenCodec(b"x" * 32),
         resolver=resolver,
-        starter=StateLaunchStarter(state),
+        starter=StateLaunchStarter(state, settings),
     )
     return TestClient(create_app(settings, services)), resolver, state
 
 
 def get_token(page: str) -> str:
-    match = re.search(r"const launchToken = (\"[^\"]+\");", page)
+    match = re.search(r"const launchToken=(\"[^\"]+\");", page)
     assert match
     return json.loads(match.group(1))
 
@@ -60,6 +61,19 @@ def launch_request():
         "gpu": "auto",
         "agent_mode": "write",
     }
+
+
+def authorize_pending(client: TestClient):
+    preview = client.get(
+        "/open",
+        params={"repo": "owner/repo", "ref": "main", "path": "demo.ipynb"},
+    )
+    token = get_token(preview.text)
+    return client.post(
+        "/api/launches",
+        json={"request": launch_request(), "launch_token": token},
+        headers={"Origin": "http://127.0.0.1:8080"},
+    )
 
 
 def test_get_open_is_preview_only(tmp_path: Path):
@@ -78,27 +92,10 @@ def test_get_open_is_preview_only(tmp_path: Path):
 
 def test_post_launch_consumes_token_once_and_persists_pending_trust(tmp_path: Path):
     client, _resolver, state = make_client(tmp_path)
-    preview = client.get(
-        "/open",
-        params={"repo": "owner/repo", "ref": "main", "path": "demo.ipynb"},
-    )
-    token = get_token(preview.text)
-    body = {"request": launch_request(), "launch_token": token}
-
-    first = client.post(
-        "/api/launches",
-        json=body,
-        headers={"Origin": "http://127.0.0.1:8080"},
-    )
-    second = client.post(
-        "/api/launches",
-        json=body,
-        headers={"Origin": "http://127.0.0.1:8080"},
-    )
-
+    first = authorize_pending(client)
     assert first.status_code == 202
     assert first.json()["state"] == "pending_trust"
-    assert second.status_code == 409
+    assert "trust_confirmation_url" in first.json()
     row = state.get_launch(first.json()["launch_id"])
     assert row is not None
     assert row["state"] == "pending_trust"
@@ -111,13 +108,11 @@ def test_cross_origin_launch_is_denied_before_launch_record(tmp_path: Path):
         params={"repo": "owner/repo", "ref": "main", "path": "demo.ipynb"},
     )
     token = get_token(preview.text)
-
     response = client.post(
         "/api/launches",
         json={"request": launch_request(), "launch_token": token},
         headers={"Origin": "https://evil.example"},
     )
-
     assert response.status_code == 403
     with state.connect() as conn:
         assert conn.execute("SELECT count(*) FROM launches").fetchone()[0] == 0
@@ -132,13 +127,64 @@ def test_token_is_bound_to_request(tmp_path: Path):
     token = get_token(preview.text)
     modified = launch_request()
     modified["gpu"] = "on"
-
     response = client.post(
         "/api/launches",
         json={"request": modified, "launch_token": token},
         headers={"Origin": "http://127.0.0.1:8080"},
     )
-
     assert response.status_code == 403
     with state.connect() as conn:
         assert conn.execute("SELECT count(*) FROM launches").fetchone()[0] == 0
+
+
+def test_exact_commit_trust_confirmation_is_one_time_and_authorizes_launch(tmp_path: Path):
+    client, _resolver, state = make_client(tmp_path)
+    pending = authorize_pending(client)
+    payload = pending.json()
+    launch_id = payload["launch_id"]
+    url = payload["trust_confirmation_url"]
+    nonce = parse_qs(urlparse(url).query)["nonce"][0]
+
+    page = client.get(url)
+    assert page.status_code == 200
+    assert page.headers["x-frame-options"] == "DENY"
+
+    grant = client.post(
+        f"/api/launches/{launch_id}/trust",
+        json={"nonce": nonce, "scope": "exact_commit"},
+        headers={"Origin": "http://127.0.0.1:8080"},
+    )
+    replay = client.post(
+        f"/api/launches/{launch_id}/trust",
+        json={"nonce": nonce, "scope": "exact_commit"},
+        headers={"Origin": "http://127.0.0.1:8080"},
+    )
+
+    assert grant.status_code == 200
+    assert grant.json()["state"] == "authorized"
+    assert replay.status_code == 409
+    row = state.get_launch(launch_id)
+    assert row["state"] == "authorized"
+    with state.connect() as conn:
+        trust = conn.execute("SELECT * FROM trust_records").fetchone()
+    assert trust["repository_id"] == 123
+    assert trust["scope"] == "exact_commit"
+    assert trust["commit_sha"] == "a" * 40
+
+
+def test_repository_trust_records_no_commit(tmp_path: Path):
+    client, _resolver, state = make_client(tmp_path)
+    payload = authorize_pending(client).json()
+    launch_id = payload["launch_id"]
+    nonce = parse_qs(urlparse(payload["trust_confirmation_url"]).query)["nonce"][0]
+
+    response = client.post(
+        f"/api/launches/{launch_id}/trust",
+        json={"nonce": nonce, "scope": "repository"},
+        headers={"Origin": "http://127.0.0.1:8080"},
+    )
+    assert response.status_code == 200
+    with state.connect() as conn:
+        trust = conn.execute("SELECT * FROM trust_records").fetchone()
+    assert trust["scope"] == "repository"
+    assert trust["commit_sha"] is None

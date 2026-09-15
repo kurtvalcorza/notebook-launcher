@@ -2,16 +2,20 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from .config import Settings
 from .launch_auth import request_digest
 from .models import LaunchRequest, ResolvedSource
 from .state import StateStore
+from .trust_flow import TrustFlowStore
 
 
 class StateLaunchStarter:
     """Persist an authorized launch without starting runtime execution."""
 
-    def __init__(self, state: StateStore) -> None:
+    def __init__(self, state: StateStore, settings: Settings | None = None) -> None:
         self.state = state
+        self.settings = settings or Settings()
+        self.trust_flow = TrustFlowStore(state)
 
     def start(
         self,
@@ -40,8 +44,17 @@ class StateLaunchStarter:
             state=state_name,
             now=now,
         )
-        return {
+        result: dict[str, object] = {
             "launch_id": launch_id,
             "state": state_name,
             "trust_covered": trust_covered,
         }
+        if source is not None and not trust_covered:
+            nonce, expires = self.trust_flow.create_challenge(
+                launch_id,
+                source,
+                ttl_seconds=self.settings.trust_challenge_ttl_seconds,
+            )
+            result["trust_confirmation_url"] = f"/trust/{launch_id}?nonce={nonce}"
+            result["trust_expires_at"] = expires.isoformat()
+        return result
