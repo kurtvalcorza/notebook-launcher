@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Notebook Launcher Local API
-  version: 0.1.0
+  version: 0.2.0
 servers:
   - url: http://127.0.0.1:8080
 paths:
@@ -55,14 +55,26 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/LaunchStatus' }
         '404': { description: Unknown launch }
+  /api/sessions/{session_id}/mcp:
+    get:
+      summary: Get the non-secret MCP attachment descriptor for a notebook session
+      description: Returns how a local MCP client can attach to the existing Jupyter session. Raw Jupyter credentials are never returned.
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: MCP descriptor, including explicit unavailable state if the configured backend lacks the required profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/McpAttachment' }
+        '404': { description: Unknown session }
+        '409': { description: Session exists but is not ready for MCP attachment }
+        '410': { description: Session has stopped and its MCP attachment is invalidated }
   /api/sessions/{session_id}:
     delete:
-      summary: Stop a notebook session
+      summary: Stop a notebook session and invalidate its MCP attachment
       parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/SessionId'
       responses:
         '204': { description: Session stopped }
         '404': { description: Unknown session }
@@ -79,6 +91,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   schemas:
     LaunchStatus:
       type: object
@@ -87,7 +104,7 @@ components:
         id: { type: string, format: uuid }
         phase:
           type: string
-          enum: [received, resolving, acquiring, building, cache_hit, starting, ready, failed, stopping, stopped]
+          enum: [received, resolving, acquiring, building, cache_hit, starting, mcp_preparing, ready, failed, stopping, stopped]
         message: { type: [string, 'null'] }
         error_code: { type: [string, 'null'] }
         commit_sha: { type: [string, 'null'] }
@@ -95,5 +112,40 @@ components:
         session_id: { type: [string, 'null'], format: uuid }
         ready_url: { type: [string, 'null'], format: uri }
         gpu_enabled: { type: [boolean, 'null'] }
+        mcp_available: { type: [boolean, 'null'] }
+        mcp_status:
+          type: [string, 'null']
+          enum: [unavailable, available, attaching, attached, error, invalidated, null]
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    McpAttachment:
+      type: object
+      required: [session_id, available, status, transport, capabilities]
+      properties:
+        session_id: { type: string, format: uuid }
+        available: { type: boolean }
+        status:
+          type: string
+          enum: [unavailable, available, attaching, attached, error, invalidated]
+        transport:
+          type: string
+          description: MCP transport identifier; MVP defaults to stdio
+          examples: [stdio]
+        command:
+          type: [string, 'null']
+          description: Local non-secret command for the MCP client
+          examples: [notebook-launcher]
+        args:
+          type: array
+          items: { type: string }
+          description: Non-secret command arguments
+        backend:
+          type: [string, 'null']
+          description: Informational MCP backend name/version
+        capabilities:
+          type: array
+          items: { type: string }
+        missing_required_capabilities:
+          type: array
+          items: { type: string }
+        message: { type: [string, 'null'] }
