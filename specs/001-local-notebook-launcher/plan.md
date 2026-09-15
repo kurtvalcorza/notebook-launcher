@@ -4,154 +4,180 @@
 
 ## Summary
 
-Build a loopback-only local web launcher that accepts a public GitHub notebook URL or `repo`/`ref`/`path`, resolves it to an immutable commit, prepares a reproducible container image with `repo2docker`, starts JupyterLab in an isolated Docker container, and redirects the browser to the requested notebook. On WSL2 hosts configured with NVIDIA Container Toolkit, the session can receive local GPU access through Docker's GPU device request.
+Build a WSL2/Linux-first local launcher that turns a user-trusted public GitHub notebook into a persistent editable local workspace and a disposable sandboxed Jupyter runtime. Resolve Git refs to immutable SHAs, use repo2docker for reproducible environments, optionally expose a local NVIDIA GPU, and attach MCP-capable agents to the same Jupyter notebook/kernel. The default agent profile is writable; a true inspection-only `readonly` profile is also required.
 
-Every ready notebook session also exposes an implementation-neutral MCP attachment contract. An MCP-capable agent can attach to the same Jupyter server/kernel, inspect the notebook, execute cells or the complete notebook, retrieve outputs/errors, execute diagnostic code, and restart/reconnect the kernel. The launcher owns the session credentials and presents a session-scoped attachment command/descriptor so agents do not need raw Jupyter tokens.
-
-The MVP intentionally does **not** require Kubernetes, BinderHub, or JupyterHub. It proves the critical path—repository resolution, repo2docker environment construction, containerized Jupyter startup, caching, GPU passthrough, and agent-driven execution—behind stable launch and MCP contracts that can later target BinderHub/JupyterHub without changing notebook links or agent semantics.
+The product behaves like a local Colab-style workflow: GitHub is immutable source input; the user works on a local persistent copy; Jupyter autosave/edits/outputs survive runtime shutdown; Save a Copy duplicates the working notebook; optional explicitly selected local storage can be mounted like external drive storage. The launcher never commits, pushes, branches, or writes back to GitHub.
 
 ## Technical Context
 
 **Language/Version**: Python 3.12+
 
-**Primary Dependencies**: FastAPI, Uvicorn, Pydantic; external runtime dependencies: Git, Docker Engine, `repo2docker`; JupyterLab inside generated images; one MCP backend/adapter capable of controlling the running Jupyter server
+**Primary Dependencies**: FastAPI, Uvicorn, Pydantic; Git, Docker Engine, repo2docker; JupyterLab inside generated images; pluggable Jupyter-capable MCP backend
 
-**Storage**: Local filesystem cache and Docker image store; in-memory launch/session state for the POC; per-session owner-readable runtime metadata for local MCP attachment if required by separate MCP subprocesses
+**Storage**: Launcher-managed local workspace root; immutable source cache/snapshot; persistent working copies and outputs; Docker image cache; owner-only private runtime/MCP state
 
-**Testing**: pytest, pytest-asyncio, FastAPI TestClient/httpx; Docker-backed integration tests; MCP adapter contract tests; end-to-end agent execution test; manual WSL2/NVIDIA GPU smoke test
+**Testing**: pytest + contract/integration tests; Docker-backed sandbox tests; MCP capability tests; workspace persistence/save-copy tests; manual WSL2/NVIDIA smoke test
 
-**Target Platform**: Primary: Windows 11 + WSL2 Ubuntu 24.04; compatible native Linux where practical
+**Target Platform**: WSL2/Linux-first, native Linux-compatible where practical
 
-**Project Type**: Local web service / launcher with local MCP bridge
-
-**Performance Goals**: Cached launch bypasses image build; launcher endpoints remain responsive during builds/execution; MCP attach to an already-ready session should not rebuild/restart the notebook runtime
-
-**Constraints**: Loopback binding by default; single-user POC; public GitHub only; no shell interpolation of user input; notebook runtime isolated from host; GPU optional; MCP must not widen the notebook's trust boundary
-
-**Scale/Scope**: One local user, a small number of concurrent launches/sessions, one local Docker daemon, one or more local MCP clients, zero distributed scheduling
+**Constraints**: Loopback-only services by default; single-user; user-trusted public GitHub only; no GitHub mutation; outbound sandbox network allowed; inbound blocked except launcher-published loopback services
 
 ## Constitution Check
 
-- **Local-first and safe by default**: PASS — service binds to `127.0.0.1`; external code runs in containers; host secrets are not mounted by default; MCP defaults to local stdio attachment.
-- **Reproducible launches**: PASS — mutable refs resolve to commit SHA; image/cache identity includes immutable source revision.
-- **Smallest useful POC**: PASS — Docker + repo2docker is selected before Kubernetes/BinderHub; an existing MCP implementation may be adapted rather than building a protocol server from scratch.
-- **Isolation and explicit resource access**: PASS — Docker provides runtime isolation; GPU is explicit; MCP inherits the same session filesystem/device scope and does not receive the Docker socket.
-- **Observable and testable pipeline**: PASS — launch phases and MCP lifecycle/execution events are surfaced/tested separately.
+- **Local-first and safe**: PASS — WSL2/Linux-first, loopback listeners, explicit trust confirmation, user-trusted source model.
+- **Reproducibility**: PASS — immutable source SHA and environment identity recorded.
+- **Complete local agent POC**: PASS — MCP edit/execute path is P1.
+- **Sandboxing**: PASS — disposable runtime with minimal mounts, restricted privileges/resources, and no host credentials/Docker socket.
+- **Agent trust boundary**: PASS — MCP uses same workspace/kernel/sandbox/GPU policy.
+- **Agent editing**: PASS — writable default plus enforced readonly inspection profile.
 
 ## Architecture
 
 ```text
-                           +-------------------+
-GitHub .ipynb ------------>|  notebook-launcher|
-                           +---------+---------+
-                                     |
-              +----------------------+----------------------+
-              |                      |                      |
-              v                      v                      v
-       Source resolver        Environment builder      Status/API
-       Git ref -> SHA         repo2docker -> image     /open /api/...
-              |                      |
-              +-----------+----------+
-                          v
-                   Runtime manager
-                          |
-             Docker + JupyterLab + kernel
-                          |
-                 optional NVIDIA GPU
-                          |
-             +------------+------------+
-             |                         |
-             v                         v
-          Browser                  MCP adapter
-      JupyterLab UI                    |
-                                       v
-                            Codex / Claude / Gemini /
-                            other MCP-capable clients
+GitHub notebook @ ref
+        |
+        v
+Source resolver -> immutable commit SHA
+        |
+        +-----------------------+
+        |                       |
+        v                       v
+immutable source/cache      Environment builder
+        |                  repo2docker -> image
+        v                       |
+Workspace manager               |
+  source/ (immutable)           |
+  work/   (persistent) <--------+
+  outputs/ (persistent)
+  optional user-data mount
+        |
+        v
+Standard sandbox runtime (disposable)
+  JupyterLab + kernel
+  optional NVIDIA GPU
+        |
+        +-------------------+
+        |                   |
+        v                   v
+     Browser             MCP adapter
+                            |
+                            v
+                Codex / Claude / Gemini / other
 ```
 
-Critical invariant:
+### Filesystem model
+
+Conceptual launcher storage:
 
 ```text
-Browser JupyterLab session === MCP-controlled Jupyter session/kernel
+~/.notebook-launcher/
+├── sources/<source-id>/          # immutable source material/cache
+├── workspaces/<workspace-id>/
+│   ├── metadata.json             # provenance + policy, no secrets
+│   ├── work/                     # persistent editable working copy
+│   └── outputs/                  # persistent generated artifacts
+└── runtime/<session-id>/         # private ephemeral state/credentials
 ```
 
-The MCP path MUST attach to the already-launched runtime. It must not silently create a separate kernel/container that diverges from what the user sees.
-
-### Launch lifecycle
-
-`received -> resolving -> acquiring -> building|cache_hit -> starting -> mcp_preparing -> ready`
-
-Terminal failure states retain the failed phase and diagnostic message. MCP may be independently `available`, `unavailable`, `attaching`, `attached`, or `error` while a ready notebook remains usable. Stopping a session transitions `ready -> stopping -> stopped`, invalidates MCP attachment, and preserves reusable image cache.
-
-### GPU policy
-
-- `gpu=auto` (default): use GPU if Docker reports a usable NVIDIA runtime/device; otherwise launch CPU-only.
-- `gpu=on`: require GPU capability; fail before notebook readiness if unavailable.
-- `gpu=off`: never request GPU devices.
-
-GPU support is provided through the host Docker/NVIDIA Container Toolkit configuration. The launcher does not install Windows drivers, CUDA drivers, or NVIDIA Container Toolkit.
-
-### MCP capability profile
-
-The launcher defines semantic capabilities rather than implementation-specific MCP tool names. P1 requires:
-
-- attach to the launched session
-- list/read the active notebook and cells
-- execute one cell
-- execute all notebook cells in order
-- execute arbitrary diagnostic code in the active kernel
-- retrieve text/error/multimodal outputs as supported by the backend/client
-- restart/reconnect the kernel
-- report backend capability availability explicitly
-
-Cell create/edit/delete is desirable for remediation and SHOULD be exposed when supported, but the adapter must report it honestly rather than inventing unsafe fallback behavior.
-
-### MCP transport and credential model
-
-For the local POC, stdio is the preferred transport because it does not require another listening port and is widely supported by coding agents. The launcher should expose a stable command shape such as:
+Runtime mounts:
 
 ```text
-notebook-launcher mcp <session-id>
+/source        read-only immutable source snapshot (optional diagnostic access)
+/workspace     persistent writable working copy
+/outputs       persistent workspace outputs
+/mnt/user-data optional explicit user-selected mount (ro or rw)
 ```
 
-That command resolves local, session-scoped runtime metadata and starts/connects the selected MCP backend to the existing Jupyter server. Raw Jupyter tokens remain internal to the launcher/MCP bridge and are not emitted in normal API responses or logs.
+The working copy SHOULD be materialized without a writable `.git` remote relationship. The launcher does not expose GitHub credentials or Git mutation operations.
 
-If per-session metadata must survive across launcher/MCP subprocess boundaries, store it under the launcher's local state directory with owner-only permissions and delete/invalidate it on session stop.
+### Workspace lifecycle
 
-A future Streamable HTTP transport may be added behind the same `McpAttachment` descriptor without changing semantic capabilities.
+```text
+source launch
+ -> resolve SHA
+ -> trust confirmation if needed
+ -> create workspace
+ -> copy/materialize editable work tree
+ -> start disposable runtime
+ -> autosave/edit/execute
+ -> stop runtime (workspace survives)
+ -> reopen workspace -> new runtime against same work tree
+```
+
+A new source launch creates a fresh workspace by default. Reuse of environment images is independent of workspace reuse.
+
+### Save a Copy
+
+Save a Copy duplicates a selected notebook from the current workspace to a validated destination:
+
+- another path inside the workspace; or
+- an explicitly configured user-data mount.
+
+The copy may preserve current notebook outputs. It never commits/pushes/branches or alters the immutable source snapshot.
+
+### Sandbox baseline
+
+The `standard` sandbox targets:
+
+- non-root notebook user where compatible with repo2docker image;
+- no privileged mode;
+- `no-new-privileges`;
+- drop unnecessary Linux capabilities (target `ALL` unless a documented runtime need exists);
+- Docker/default seccomp or equivalent runtime syscall filtering;
+- CPU, memory, and PID limits configurable with safe defaults;
+- only explicit workspace/output/user-data mounts;
+- no Docker socket, SSH keys, cloud/GitHub credentials, or whole-home mounts;
+- outbound network permitted by default;
+- inbound connectivity blocked except Jupyter/launcher-controlled ports published to `127.0.0.1`.
+
+Exact compatible flags are validated during implementation; any relaxation requires explicit documentation and tests.
+
+### Trust decision
+
+Because `/open` is reachable through a browser, a new remote source must not silently proceed to code/environment execution. First-time/untrusted source launches enter a confirmation state showing repository, resolved SHA, and notebook path. A local trust record may suppress repeated prompts according to configured policy. Trust does not make sandboxing optional.
+
+### Agent profiles
+
+`write` (default): inspect notebook/cells/outputs, mutate notebook cells, execute cells/notebook/diagnostics, restart kernel.
+
+`readonly`: inspect notebook/cells/outputs only. Execution and mutation are rejected at the launcher/MCP adapter boundary. This is intentionally stricter than “execute but don't edit,” because arbitrary code execution can mutate workspace state.
+
+### Execution semantics
+
+- Same Jupyter kernel for browser and MCP.
+- Single-cell and whole-notebook execution use Jupyter kernel APIs, not conversion to a separate Python script.
+- Whole-notebook execution preserves notebook order and defaults to stop-on-error.
+- Cell outputs/tracebacks remain visible through Jupyter/MCP and are persisted when the working notebook is saved.
+- Timeouts/cancellation distinguish kernel exception, timeout, cancellation, and MCP transport failure.
+
+### Network policy
+
+Outbound network is allowed in the POC for packages, model weights, datasets, and APIs. No additional inbound sandbox port is exposed unless explicitly designed; Jupyter is published only on loopback. Stronger egress policy is deferred.
 
 ## Project Structure
 
 ```text
 src/notebook_launcher/
-├── __init__.py
-├── app.py                 # FastAPI application and routes
-├── cli.py                 # service CLI + `mcp <session-id>` bridge entry point
-├── config.py              # local paths, bind host/port, runtime/MCP options
-├── models.py              # request/source/status/session/MCP models
-├── source.py              # GitHub parsing, validation, ref resolution
-├── repository.py          # clone/fetch/cache/checkout operations
-├── environment.py         # repo2docker image identity/build/cache
-├── runtime.py             # Docker/Jupyter session lifecycle and GPU flags
-├── mcp.py                 # semantic MCP adapter + backend process bridge
-├── audit.py               # sanitized launch/MCP execution events
-├── orchestration.py       # launch state machine
-└── errors.py              # typed user-facing failures
+├── app.py
+├── cli.py
+├── config.py
+├── models.py
+├── source.py
+├── trust.py
+├── repository.py
+├── workspace.py
+├── environment.py
+├── sandbox.py
+├── runtime.py
+├── mcp.py
+├── audit.py
+├── orchestration.py
+└── errors.py
 
 tests/
 ├── unit/
-│   ├── test_source.py
-│   ├── test_environment.py
-│   ├── test_runtime.py
-│   ├── test_mcp.py
-│   └── test_orchestration.py
 ├── contract/
-│   ├── test_openapi.py
-│   └── test_mcp_capabilities.py
 ├── integration/
-│   ├── test_public_repo_launch.py
-│   ├── test_cached_launch.py
-│   └── test_agent_notebook_execution.py
 └── fixtures/
 
 specs/001-local-notebook-launcher/
@@ -162,60 +188,45 @@ specs/001-local-notebook-launcher/
 ├── quickstart.md
 ├── contracts/
 │   ├── openapi.yaml
-│   └── mcp-capabilities.md
+│   ├── mcp-capabilities.md
+│   └── workspace-lifecycle.md
 └── tasks.md
-
-pyproject.toml
-README.md
 ```
-
-**Structure Decision**: Single Python launcher plus a contained MCP adapter module. Repository, environment, runtime, and MCP responsibilities remain separated so a future BinderHub/JupyterHub runtime or different MCP implementation can replace the corresponding backend without changing `/open` or the semantic MCP capability contract.
 
 ## Implementation Phases
 
-### Phase 0 — Host/runtime validation
+### Phase 0 — Host and backend diagnostics
 
-Verify Git, Docker, repo2docker, optional NVIDIA container GPU capability, and configured MCP backend availability independently. Do not mix host bootstrap into notebook launch orchestration.
+Verify Git, Docker, repo2docker, optional NVIDIA container capability, and MCP backend availability.
 
-### Phase 1 — Source and launch contract
+### Phase 1 — Source resolution and trust
 
-Implement strict parsing for full GitHub notebook URLs and explicit repository/ref/path requests. Resolve refs, normalize notebook paths, and produce immutable `ResolvedSource` records.
+Parse GitHub source, resolve SHA, validate notebook path, and implement explicit first-time trust confirmation before remote code/environment execution.
 
-### Phase 2 — Reproducible environment build
+### Phase 2 — Persistent workspace
 
-Acquire the repository at the resolved commit and use repo2docker to build/tag a local image. Cache by immutable environment identity. Use structured argv and never shell-composed user input.
+Create immutable source provenance plus persistent editable work/output directories. Implement reopen and Save a Copy. Ensure runtime teardown never deletes workspace by default.
 
-### Phase 3 — Jupyter session runtime
+### Phase 3 — Reproducible environment and standard sandbox
 
-Launch the prepared image with a generated token and dynamically allocated loopback port. Optionally request NVIDIA GPU devices. Detect Jupyter and kernel readiness before marking the runtime attachable.
+Build/cache image through repo2docker and start it with baseline sandbox restrictions, explicit mounts, outbound-only network policy, and optional GPU.
 
-### Phase 4 — MCP attachment and agent execution
+### Phase 4 — Jupyter runtime
 
-Implement the semantic MCP adapter and session descriptor. Start/connect the chosen MCP backend against the existing Jupyter server, prove notebook/cell inspection, cell/full-notebook execution, output/error propagation, arbitrary kernel diagnostics, and restart/reconnect behavior. Add audit events for attachment and execution lifecycle.
+Start authenticated Jupyter on a loopback-published port against the workspace, probe server/kernel readiness, and open the requested working notebook.
 
-### Phase 5 — Status, cleanup, and security tests
+### Phase 5 — MCP agent control
 
-Expose launch/session/MCP status, phase-specific errors, stop/cleanup, cached-launch verification, unsafe-input tests, cross-session/credential-boundary tests, and WSL2 GPU procedures.
+Attach selected MCP backend to the same Jupyter runtime. Implement writable default capability set and enforced readonly inspection set.
 
-### Phase 6 — End-to-end acceptance
+### Phase 6 — Persistence/mount/status/cleanup
 
-Run the complete path:
+Add optional explicit user-data mount, status APIs, runtime stop/reopen, MCP invalidation, and artifact persistence verification.
 
-```text
-GitHub notebook
-  -> /open
-  -> repo2docker image
-  -> local Jupyter session
-  -> optional local GPU
-  -> MCP attachment
-  -> agent executes notebook
-  -> outputs/errors visible in same session
-```
+### Phase 7 — End-to-end acceptance
 
-### Phase 7 — Backend evolution (out of MVP)
-
-Add BinderHub/JupyterHub and/or alternative MCP backends behind the established contracts. Do not change existing launch links or semantic MCP capability requirements merely because backend implementation changes.
+Prove GitHub -> trust -> workspace -> sandbox/Jupyter -> GPU optional -> MCP edit/execute/repair -> stop -> workspace reopen.
 
 ## Complexity Tracking
 
-The addition of MCP is justified because agent-driven execution is now a P1 product requirement. The design avoids a second orchestration platform: MCP attaches to the same Jupyter session and defaults to stdio. Kubernetes/BinderHub and custom protocol implementation remain deferred.
+Persistent workspace and MCP are required by the desired Colab-like local UX and agent-operable MVP. They remain separated from runtime orchestration so future BinderHub/JupyterHub, alternate sandbox, and alternate MCP backends can replace implementation details without changing user-facing semantics.

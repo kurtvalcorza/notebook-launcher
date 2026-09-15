@@ -2,107 +2,138 @@
 
 ## Host prerequisites
 
-Inside WSL2/Linux, confirm these independently before using the launcher:
+Inside WSL2/Linux:
 
 ```bash
-nvidia-smi                 # required only for GPU acceptance test
 git --version
 docker version
 repo2docker --version
+nvidia-smi  # GPU acceptance only
 ```
 
-The configured MCP backend/client must also be available for the agent acceptance path. The launcher should provide a diagnostic command/status rather than requiring users to know backend-specific probes.
-
-For GPU containers, a direct Docker smoke test must succeed before blaming the launcher:
+For GPU containers, first prove the host/runtime independently:
 
 ```bash
 docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 ```
 
-## Development setup
+## Start launcher
 
 ```bash
 git clone https://github.com/kurtvalcorza/notebook-launcher.git
 cd notebook-launcher
 git switch 001-local-notebook-launcher
-
 uv sync --dev
 uv run notebook-launcher
 ```
 
-Expected default listener:
+Default listener:
 
 ```text
 http://127.0.0.1:8080
 ```
 
-## Launch by full GitHub notebook URL
+## Launch from GitHub
 
 ```text
 http://127.0.0.1:8080/open?url=https://github.com/kurtvalcorza/swin-segmentation-pipeline/blob/main/tutorials/swin_segmentation_task_inference.ipynb
 ```
 
-## Launch by explicit source fields
+or:
 
 ```text
 http://127.0.0.1:8080/open?repo=kurtvalcorza/swin-segmentation-pipeline&ref=main&path=tutorials/swin_segmentation_task_inference.ipynb
 ```
 
-## Require the local GPU
+The first launch of an untrusted source may show a local confirmation page identifying repository, immutable SHA, and notebook before any repository-supplied code/environment setup executes.
 
-Append:
+## Workspace behavior
+
+The remote source is not edited. The launcher creates persistent local work:
 
 ```text
+source snapshot @ SHA   immutable
+workspace/work/         editable + persistent
+workspace/outputs/      generated artifacts + persistent
+runtime/container       disposable
+```
+
+Edit/run the notebook normally in JupyterLab. Stop the runtime and reopen with:
+
+```text
+http://127.0.0.1:8080/open?workspace_id=<WORKSPACE_ID>
+```
+
+The existing working copy is reused.
+
+## Save a Copy
+
+Conceptual API:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/workspaces/<WORKSPACE_ID>/notebooks/copy \
+  -H 'content-type: application/json' \
+  -d '{
+    "source_path": "tutorials/example.ipynb",
+    "destination_scope": "workspace",
+    "destination_path": "copies/example-copy.ipynb",
+    "include_outputs": true
+  }'
+```
+
+This is local copying only. It never commits, pushes, creates a Git branch, or modifies GitHub.
+
+## Optional local data mount
+
+No host folder is mounted by default. A user may explicitly configure one local directory as `ro` or `rw`; the runtime sees it at a stable path such as:
+
+```text
+/mnt/user-data
+```
+
+The repository launch URL cannot choose that host path. Do not mount your whole home directory merely for convenience.
+
+## GPU modes
+
+Append one of:
+
+```text
+&gpu=auto
 &gpu=on
-```
-
-Inside the launched notebook:
-
-```python
-import torch
-assert torch.cuda.is_available()
-print(torch.cuda.get_device_name(0))
-```
-
-## CPU-only launch
-
-Append:
-
-```text
 &gpu=off
 ```
 
-## Attach an MCP-capable agent
+GPU check:
 
-Once launch status is `ready`, note the `session_id` and inspect the non-secret attachment descriptor:
+```python
+import torch
+print(torch.cuda.is_available())
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
+```
+
+## Agent modes
+
+Default writable agent:
+
+```text
+&agent_mode=write
+```
+
+Inspection-only agent:
+
+```text
+&agent_mode=readonly
+```
+
+`readonly` cannot execute code, edit cells, restart the kernel, or mutate workspace state.
+
+## Attach MCP agent
 
 ```bash
 curl http://127.0.0.1:8080/api/sessions/<SESSION_ID>/mcp
 ```
 
-Expected shape:
-
-```json
-{
-  "session_id": "<SESSION_ID>",
-  "available": true,
-  "status": "available",
-  "transport": "stdio",
-  "command": "notebook-launcher",
-  "args": ["mcp", "<SESSION_ID>"],
-  "capabilities": [
-    "notebook.read",
-    "cell.read",
-    "cell.execute",
-    "notebook.execute_all",
-    "kernel.execute_code",
-    "output.read",
-    "kernel.restart"
-  ]
-}
-```
-
-Configure the MCP client with the returned command and args. A generic stdio configuration is conceptually:
+Generic stdio client configuration:
 
 ```json
 {
@@ -111,50 +142,32 @@ Configure the MCP client with the returned command and args. A generic stdio con
 }
 ```
 
-If running from the repository rather than an installed command, the development equivalent may be:
+Raw Jupyter tokens are not copied into client configuration.
 
-```json
-{
-  "command": "uv",
-  "args": ["run", "notebook-launcher", "mcp", "<SESSION_ID>"]
-}
-```
+## Writable agent acceptance
 
-The client configuration MUST NOT require copying the raw Jupyter token.
+1. Read the active notebook.
+2. Edit/insert a controlled cell.
+3. Execute the cell and observe output in the same Jupyter kernel.
+4. Execute the notebook in order.
+5. Encounter a deliberate failing cell and inspect traceback.
+6. Repair the cell and continue/re-run.
+7. Restart the kernel and execute again.
+8. For GPU sessions, confirm MCP and browser GPU probes agree.
 
-## Agent acceptance prompts
+## Persistence acceptance
 
-After attachment, verify the agent can perform the semantic operations in `contracts/mcp-capabilities.md`. A practical acceptance sequence is:
+1. Edit a notebook and save it.
+2. Generate a file under `/outputs`.
+3. Stop the session.
+4. Reopen the same workspace ID.
+5. Confirm edit, notebook outputs, and generated file survive.
+6. Save a copy and confirm both notebooks exist.
 
-1. Read the active notebook and summarize its code-cell sequence.
-2. Execute a harmless diagnostic cell/code request and report output.
-3. Execute the notebook from top to bottom.
-4. If a cell fails, identify the failing cell and traceback without dropping the MCP session.
-5. Restart the kernel and execute a simple expression again.
-6. For a GPU session, execute:
+## Sandbox/network expectations
 
-```python
-import torch
-print(torch.cuda.is_available())
-print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
-```
+The standard runtime is restricted and receives only explicit mounts. It has outbound network access for packages/models/data/APIs, but Jupyter is published only to loopback and no general inbound sandbox ports are exposed.
 
-The result must agree with execution from the browser-visible notebook.
+## Trust note
 
-## POC acceptance sequence
-
-1. Launch a small public notebook successfully.
-2. Confirm the notebook opens directly, not merely the Jupyter file browser.
-3. Confirm a repository-declared dependency imports successfully.
-4. Stop the session and relaunch the same commit; confirm image build is skipped.
-5. Launch with `gpu=on` and confirm CUDA sees the local NVIDIA GPU.
-6. Retrieve the MCP descriptor and attach an MCP-capable agent without manually providing a Jupyter token.
-7. Have the agent read and execute the same notebook/kernel visible in JupyterLab.
-8. Verify a deliberate cell failure is surfaced with useful context and the agent can continue/restart.
-9. Verify an MCP-driven GPU probe agrees with browser execution.
-10. Stop the notebook session and confirm its MCP attachment becomes unusable.
-11. Submit malformed URLs, traversal inputs, and invalid session IDs and confirm they fail safely.
-
-## Important trust note
-
-Launching a repository means executing code and environment setup supplied by that repository. Giving an agent MCP control intentionally lets it execute code inside that notebook runtime. Use repositories and agent instructions you trust. Containerization reduces host exposure but is not a substitute for repository review or a hardened sandbox.
+Only launch public repositories you trust. Sandboxing is defense-in-depth, not a promise that arbitrary malicious code is safe. The runtime receives no GitHub credentials by default and this feature never writes back to GitHub.

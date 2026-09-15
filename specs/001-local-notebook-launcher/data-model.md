@@ -2,157 +2,156 @@
 
 ## LaunchRequest
 
-Represents validated user intent before Git resolution.
-
 | Field | Type | Notes |
 |---|---|---|
-| `url` | string? | Full GitHub notebook URL; mutually exclusive with explicit source fields |
+| `url` | string? | Full GitHub notebook URL |
 | `repo` | string? | `owner/repository` |
-| `ref` | string? | Branch, tag, or commit supplied by user |
-| `path` | string? | Repository-relative `.ipynb` path |
+| `ref` | string? | Branch/tag/SHA |
+| `path` | string? | Repository-relative `.ipynb` |
+| `workspace_id` | UUID? | Reopen existing workspace; mutually exclusive with remote source fields |
 | `gpu` | enum | `auto`, `on`, `off`; default `auto` |
+| `agent_mode` | enum | `write`, `readonly`; default `write` |
 
 ## ResolvedSource
-
-Canonical, immutable source identity used downstream.
 
 | Field | Type | Notes |
 |---|---|---|
 | `owner` | string | GitHub owner |
-| `repository` | string | GitHub repository |
-| `requested_ref` | string | Original branch/tag/SHA |
-| `commit_sha` | string | Resolved immutable commit |
-| `notebook_path` | string | Normalized repository-relative path |
-| `clone_url` | string | Validated HTTPS GitHub clone URL |
+| `repository` | string | Repository name |
+| `requested_ref` | string | User input ref |
+| `commit_sha` | string | Immutable resolved SHA |
+| `notebook_path` | string | Normalized repo-relative `.ipynb` |
+| `clone_url` | string | Constructed validated HTTPS GitHub URL |
 
-Invariant: `notebook_path` is relative, normalized, ends in `.ipynb`, and cannot escape the repository root.
+## TrustDecision
+
+| Field | Type | Notes |
+|---|---|---|
+| `source_key` | string | Repository/revision policy identity |
+| `status` | enum | `pending`, `trusted`, `denied` |
+| `decided_at` | datetime? | Local decision time |
+| `scope` | enum | e.g. exact revision or repository policy |
 
 ## EnvironmentIdentity
 
-Stable cache identity for a built execution environment.
+| Field | Type | Notes |
+|---|---|---|
+| `commit_sha` | string | Immutable source revision |
+| `builder_version` | string | repo2docker/strategy version |
+| `environment_digest` | string | Hash of environment-defining inputs |
+| `image_tag` | string | Local image identifier |
+
+## Workspace
+
+Persistent user state independent from runtime/container lifetime.
 
 | Field | Type | Notes |
 |---|---|---|
-| `source` | ResolvedSource ref | Immutable repository revision |
-| `builder_version` | string | repo2docker/versioned launcher build strategy |
-| `digest` | string | Hash used in local image tag/cache lookup |
-| `image_tag` | string | Local Docker image name/tag |
+| `id` | UUID | Workspace identity |
+| `source` | ResolvedSource | Provenance of original source |
+| `root_path` | local path | Launcher-managed workspace root |
+| `work_path` | local path | Persistent editable copy |
+| `outputs_path` | local path | Persistent generated artifacts |
+| `active_notebook_path` | string | Workspace-relative active notebook |
+| `created_at` | datetime | Creation time |
+| `updated_at` | datetime | Last meaningful update |
+| `user_data_mount` | UserDataMount? | Explicit optional host-data mount policy |
+
+Invariant: deleting/stopping a runtime does not delete the workspace unless the user explicitly requests workspace deletion.
+
+## SourceSnapshot
+
+Immutable source material/provenance associated with a workspace. It MUST NOT be modified by Jupyter/MCP operations. The working copy is materialized separately and SHOULD NOT carry a writable Git remote relationship.
+
+## UserDataMount
+
+| Field | Type | Notes |
+|---|---|---|
+| `host_path` | local path | Explicitly user-selected; never derived from remote URL |
+| `container_path` | string | Stable path, default `/mnt/user-data` |
+| `mode` | enum | `ro` or `rw` |
 
 ## Launch
 
-Tracks orchestration before and during session creation.
-
 | Field | Type | Notes |
 |---|---|---|
-| `id` | UUID | Public local identifier |
-| `request` | LaunchRequest | Sanitized request |
-| `source` | ResolvedSource? | Populated after resolution |
-| `environment` | EnvironmentIdentity? | Populated before build/cache check |
+| `id` | UUID | Launch attempt |
+| `request` | LaunchRequest | Sanitized input |
+| `source` | ResolvedSource? | For remote-source launch |
+| `workspace_id` | UUID? | Created/resolved workspace |
+| `environment` | EnvironmentIdentity? | Runtime environment identity |
 | `phase` | enum | lifecycle phase |
-| `message` | string? | User-safe progress/error description |
-| `error_code` | string? | Stable machine-readable failure category |
-| `session_id` | UUID? | Populated after runtime starts |
-| `created_at` | datetime | Local launch creation time |
-| `updated_at` | datetime | Last state transition |
+| `message` | string? | Safe progress/error text |
+| `error_code` | string? | Stable machine-readable category |
+| `session_id` | UUID? | Runtime session when started |
 
-### Launch phases
-
-`received`, `resolving`, `acquiring`, `building`, `cache_hit`, `starting`, `mcp_preparing`, `ready`, `failed`, `stopping`, `stopped`.
+Phases: `received`, `resolving`, `awaiting_trust`, `acquiring`, `workspace_preparing`, `building`, `cache_hit`, `starting`, `mcp_preparing`, `ready`, `failed`, `stopping`, `stopped`.
 
 ## NotebookSession
 
-Runtime record for a running local notebook server.
+Disposable runtime record.
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | UUID | Session identity |
-| `launch_id` | UUID | Owning launch |
-| `container_id` | string | Docker container identifier |
-| `host_port` | integer | Random loopback-published port |
-| `jupyter_token` | secret string | Internal only; never returned by ordinary APIs or logs |
-| `gpu_enabled` | boolean | Whether GPU devices were requested successfully |
-| `notebook_url` | string | Local JupyterLab target URL; API may return redacted/redirect form |
-| `mcp_attachment` | McpAttachment? | Agent attachment capability for this session |
-| `started_at` | datetime | Session start time |
-
-Invariant: the MCP backend identified by `mcp_attachment` targets this session's Jupyter server/workspace/kernel lifecycle and does not create an unrelated runtime.
+| `workspace_id` | UUID | Persistent workspace |
+| `container_id` | string | Runtime container |
+| `host_port` | integer | Loopback Jupyter port |
+| `jupyter_token` | secret | Private runtime state only |
+| `gpu_enabled` | boolean | Effective GPU allocation |
+| `agent_mode` | enum | `write` or `readonly` |
+| `sandbox_profile` | string | MVP: `standard` |
+| `notebook_url` | string | Browser target |
+| `mcp_attachment` | McpAttachment? | Agent descriptor |
 
 ## McpAttachment
 
-Public, non-secret description of how an MCP-capable client attaches to a ready notebook session.
-
 | Field | Type | Notes |
 |---|---|---|
-| `session_id` | UUID | Owning notebook session |
-| `available` | boolean | Whether the configured backend can satisfy the minimum profile |
+| `session_id` | UUID | Owning runtime |
+| `available` | boolean | Whether selected backend satisfies profile |
 | `status` | enum | `unavailable`, `available`, `attaching`, `attached`, `error`, `invalidated` |
-| `transport` | enum/string | `stdio` for MVP; extensible later |
-| `command` | string? | Stable local launcher command, e.g. `notebook-launcher` |
-| `args` | list[string] | Non-secret args, e.g. `mcp <session-id>` |
-| `backend` | string? | Informational backend identifier/version |
-| `capabilities` | list[string] | Semantic capability IDs supported for this session |
-| `message` | string? | Safe explanation when unavailable/error |
+| `transport` | string | MVP: `stdio` |
+| `command` | string? | Local non-secret command |
+| `args` | list[string] | Non-secret args |
+| `backend` | string? | Informational backend/version |
+| `agent_mode` | enum | `write` or `readonly` |
+| `capabilities` | list[string] | Semantic capabilities actually exposed |
 
-The descriptor MUST NOT contain `jupyter_token` or backend secrets.
-
-### Minimum semantic MCP capability IDs
-
-- `notebook.read`
-- `cell.read`
-- `cell.execute`
-- `notebook.execute_all`
-- `kernel.execute_code`
-- `kernel.restart`
-- `output.read`
-
-Optional remediation capabilities:
-
-- `cell.insert`
-- `cell.update`
-- `cell.delete`
+Raw Jupyter credentials are forbidden from this descriptor.
 
 ## McpRuntimeState
 
-Private local state used by `notebook-launcher mcp <session-id>` to connect the selected backend to the existing Jupyter session.
+Private owner-only state used by the local bridge: session ID, loopback Jupyter URL, Jupyter token, workspace/notebook path, backend, permission profile. It expires with session stop.
+
+## NotebookCopyRequest
 
 | Field | Type | Notes |
 |---|---|---|
-| `session_id` | UUID | Session identity |
-| `jupyter_url` | string | Loopback URL for target server |
-| `jupyter_token` | secret string | Injected directly into backend environment/config |
-| `notebook_path` | string | Active document path |
-| `backend` | string | Configured MCP adapter/backend |
-| `expires_with_session` | boolean | Always true in MVP |
-
-If persisted across processes, storage MUST be owner-readable only and deleted/invalidated on session stop.
+| `source_path` | string | Workspace-relative `.ipynb` |
+| `destination_scope` | enum | `workspace` or `user_data` |
+| `destination_path` | string | Validated relative destination path |
+| `include_outputs` | boolean | Preserve current outputs when true |
+| `overwrite` | boolean | Default false |
 
 ## AgentExecutionEvent
-
-Sanitized audit event for MCP-driven operations.
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | UUID | Event identity |
 | `session_id` | UUID | Notebook session |
-| `operation` | string | Semantic capability/operation |
-| `target` | string? | Bounded identifier such as cell index/id; avoid full source by default |
-| `started_at` | datetime | Start time |
-| `duration_ms` | integer? | Completion duration |
-| `success` | boolean? | Null while active |
-| `error_type` | string? | Sanitized failure class/category |
-| `client_label` | string? | Optional caller label when available |
+| `operation` | string | Semantic operation |
+| `target` | string? | Cell ID/index etc. |
+| `started_at` | datetime | Start |
+| `duration_ms` | integer? | Duration |
+| `outcome` | enum? | success/failure/timeout/cancelled |
+| `error_type` | string? | Sanitized category |
 
-Full cell source/output is not logged by default; it remains in notebook/Jupyter state and MCP response payloads.
+Full cell source/output is not logged by default.
 
-## LaunchStatus
+## Cache vs Persistence
 
-User/API view of launch state. In addition to launch fields it may include:
-
-| Field | Type | Notes |
-|---|---|---|
-| `mcp_available` | boolean? | Null until session/MCP preparation occurs |
-| `mcp_status` | string? | Safe MCP lifecycle summary |
-
-## Cache
-
-The MVP relies on Docker image storage plus repository work directories rather than a separate database. Cache deletion is an explicit maintenance operation and is not coupled to stopping a notebook session. Per-session private runtime metadata is not cache and MUST be invalidated during session cleanup.
+- **Environment cache**: reusable image/build artifacts; may be deleted independently.
+- **Source cache/snapshot**: immutable provenance material.
+- **Workspace**: persistent user edits/outputs; survives runtime stop.
+- **Runtime state**: ephemeral credentials/process metadata; invalidated on session stop.

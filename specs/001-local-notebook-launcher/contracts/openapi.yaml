@@ -1,14 +1,14 @@
 openapi: 3.1.0
 info:
   title: Notebook Launcher Local API
-  version: 0.2.0
+  version: 0.3.0
 servers:
   - url: http://127.0.0.1:8080
 paths:
   /open:
     get:
-      summary: Start a notebook launch
-      description: Accept either url or the repo/ref/path tuple. Creates a local launch and redirects to its status page.
+      summary: Start a remote-source launch or reopen a persistent workspace
+      description: Remote source uses url or repo/ref/path. Existing work uses workspace_id. New untrusted remote sources may redirect to a local trust-confirmation state before execution.
       parameters:
         - name: url
           in: query
@@ -22,27 +22,20 @@ paths:
         - name: path
           in: query
           schema: { type: string }
+        - name: workspace_id
+          in: query
+          schema: { type: string, format: uuid }
         - name: gpu
           in: query
-          schema:
-            type: string
-            enum: [auto, on, off]
-            default: auto
+          schema: { type: string, enum: [auto, on, off], default: auto }
+        - name: agent_mode
+          in: query
+          schema: { type: string, enum: [write, readonly], default: write }
       responses:
-        '303':
-          description: Launch accepted; redirect to status page
-        '400':
-          description: Invalid or unsafe launch request
-        '422':
-          description: Conflicting or incomplete source parameters
-  /launches/{launch_id}:
-    get:
-      summary: Human-facing launch status page
-      parameters:
-        - $ref: '#/components/parameters/LaunchId'
-      responses:
-        '200': { description: Status page or ready redirect response }
-        '404': { description: Unknown launch }
+        '303': { description: Launch accepted; redirect to status/trust page }
+        '400': { description: Invalid or unsafe request }
+        '404': { description: Unknown workspace/source }
+        '422': { description: Conflicting or incomplete parameters }
   /api/launches/{launch_id}:
     get:
       summary: Get launch state
@@ -55,35 +48,77 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/LaunchStatus' }
         '404': { description: Unknown launch }
+  /api/launches/{launch_id}/trust:
+    post:
+      summary: Approve or deny execution of a pending remote source
+      parameters:
+        - $ref: '#/components/parameters/LaunchId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [trust, deny] }
+                remember_scope: { type: string, enum: [revision, repository], default: revision }
+      responses:
+        '200': { description: Decision recorded }
+        '409': { description: Launch is not awaiting trust }
+  /api/workspaces/{workspace_id}:
+    get:
+      summary: Get persistent workspace metadata
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Workspace metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workspace' }
+        '404': { description: Unknown workspace }
+  /api/workspaces/{workspace_id}/notebooks/copy:
+    post:
+      summary: Save a copy of a notebook within persistent local storage
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotebookCopyRequest' }
+      responses:
+        '201': { description: Notebook copy created }
+        '400': { description: Invalid/traversing destination }
+        '409': { description: Destination exists and overwrite=false }
   /api/sessions/{session_id}/mcp:
     get:
-      summary: Get the non-secret MCP attachment descriptor for a notebook session
-      description: Returns how a local MCP client can attach to the existing Jupyter session. Raw Jupyter credentials are never returned.
+      summary: Get non-secret MCP attachment descriptor
       parameters:
         - $ref: '#/components/parameters/SessionId'
       responses:
         '200':
-          description: MCP descriptor, including explicit unavailable state if the configured backend lacks the required profile
+          description: Attachment descriptor
           content:
             application/json:
               schema: { $ref: '#/components/schemas/McpAttachment' }
         '404': { description: Unknown session }
-        '409': { description: Session exists but is not ready for MCP attachment }
-        '410': { description: Session has stopped and its MCP attachment is invalidated }
+        '409': { description: Session not ready }
+        '410': { description: Session stopped/invalidated }
   /api/sessions/{session_id}:
     delete:
-      summary: Stop a notebook session and invalidate its MCP attachment
+      summary: Stop disposable runtime while preserving workspace/cache
       parameters:
         - $ref: '#/components/parameters/SessionId'
       responses:
-        '204': { description: Session stopped }
+        '204': { description: Runtime stopped; workspace preserved }
         '404': { description: Unknown session }
   /health:
     get:
       summary: Launcher health
       responses:
-        '200':
-          description: Service is running
+        '200': { description: Service running }
 components:
   parameters:
     LaunchId:
@@ -96,6 +131,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    WorkspaceId:
+      name: workspace_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   schemas:
     LaunchStatus:
       type: object
@@ -104,44 +144,55 @@ components:
         id: { type: string, format: uuid }
         phase:
           type: string
-          enum: [received, resolving, acquiring, building, cache_hit, starting, mcp_preparing, ready, failed, stopping, stopped]
+          enum: [received, resolving, awaiting_trust, acquiring, workspace_preparing, building, cache_hit, starting, mcp_preparing, ready, failed, stopping, stopped]
         message: { type: [string, 'null'] }
         error_code: { type: [string, 'null'] }
         commit_sha: { type: [string, 'null'] }
+        workspace_id: { type: [string, 'null'], format: uuid }
         notebook_path: { type: [string, 'null'] }
         session_id: { type: [string, 'null'], format: uuid }
         ready_url: { type: [string, 'null'], format: uri }
         gpu_enabled: { type: [boolean, 'null'] }
+        agent_mode: { type: [string, 'null'], enum: [write, readonly, null] }
         mcp_available: { type: [boolean, 'null'] }
-        mcp_status:
-          type: [string, 'null']
-          enum: [unavailable, available, attaching, attached, error, invalidated, null]
+        mcp_status: { type: [string, 'null'] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    Workspace:
+      type: object
+      required: [id, commit_sha, active_notebook_path, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        repository: { type: string }
+        commit_sha: { type: string }
+        active_notebook_path: { type: string }
+        outputs_path: { type: string }
+        user_data_mounted: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    NotebookCopyRequest:
+      type: object
+      required: [source_path, destination_scope, destination_path]
+      properties:
+        source_path: { type: string }
+        destination_scope: { type: string, enum: [workspace, user_data] }
+        destination_path: { type: string }
+        include_outputs: { type: boolean, default: true }
+        overwrite: { type: boolean, default: false }
     McpAttachment:
       type: object
-      required: [session_id, available, status, transport, capabilities]
+      required: [session_id, available, status, transport, agent_mode, capabilities]
       properties:
         session_id: { type: string, format: uuid }
         available: { type: boolean }
-        status:
-          type: string
-          enum: [unavailable, available, attaching, attached, error, invalidated]
-        transport:
-          type: string
-          description: MCP transport identifier; MVP defaults to stdio
-          examples: [stdio]
-        command:
-          type: [string, 'null']
-          description: Local non-secret command for the MCP client
-          examples: [notebook-launcher]
+        status: { type: string, enum: [unavailable, available, attaching, attached, error, invalidated] }
+        transport: { type: string, examples: [stdio] }
+        command: { type: [string, 'null'], examples: [notebook-launcher] }
         args:
           type: array
           items: { type: string }
-          description: Non-secret command arguments
-        backend:
-          type: [string, 'null']
-          description: Informational MCP backend name/version
+        backend: { type: [string, 'null'] }
+        agent_mode: { type: string, enum: [write, readonly] }
         capabilities:
           type: array
           items: { type: string }
