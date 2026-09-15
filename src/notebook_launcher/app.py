@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import html
 import ipaddress
 import json
 import secrets
@@ -55,6 +54,16 @@ def _normalized_digest(request: LaunchRequest, source: ResolvedSource | None) ->
         payload["resolved_commit_sha"] = source.commit_sha
         payload["resolved_notebook_path"] = source.notebook_path
     return request_digest(payload)
+
+
+def _safe_script_json(value: object) -> str:
+    # Avoid script-breakout if any user-controlled value contains HTML markup.
+    return (
+        json.dumps(value, separators=(",", ":"))
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -138,19 +147,19 @@ def create_app(
         trust_covered = bool(source and trust.find(source).trusted)
         digest = _normalized_digest(request_model, source)
         token, expires = services.token_codec.issue(digest)
-        request_json = json.dumps(request_model.model_dump(mode="json", exclude_none=True))
-        safe_request = html.escape(request_json, quote=True)
-        safe_token = html.escape(token, quote=True)
+        request_js = _safe_script_json(request_model.model_dump(mode="json", exclude_none=True))
+        token_js = _safe_script_json(token)
+        expires_text = expires.isoformat()
         html_body = f"""<!doctype html>
 <html><body>
 <h1>Notebook launch preview</h1>
 <p>Trust covered: {str(trust_covered).lower()}</p>
-<p>Authorization expires: {html.escape(expires.isoformat())}</p>
+<p>Authorization expires: {expires_text}</p>
 <button id="launch">Launch locally</button>
 <pre id="status"></pre>
 <script>
-const launchRequest = JSON.parse('{safe_request}');
-const launchToken = '{safe_token}';
+const launchRequest = {request_js};
+const launchToken = {token_js};
 document.getElementById('launch').addEventListener('click', async () => {{
   const response = await fetch('/api/launches', {{
     method: 'POST',

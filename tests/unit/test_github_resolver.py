@@ -43,10 +43,12 @@ def test_blob_url_prefers_longest_valid_slash_ref():
                 "owner": {"login": "owner"},
                 "clone_url": "https://github.com/owner/repo.git",
             })
-        if request.url.path.endswith("/commits/feature%2Fdemo"):
-            return response(200, {"sha": "c" * 40})
-        if request.url.path.endswith("/commits/feature%2Fdemo%2Fnotebooks"):
+        # httpx exposes URL.path decoded; the resolver still sends the slash-ref
+        # as a percent-encoded path segment on the wire.
+        if request.url.path.endswith("/commits/feature/demo/notebooks"):
             return response(404, {})
+        if request.url.path.endswith("/commits/feature/demo"):
+            return response(200, {"sha": "c" * 40})
         if request.url.path.endswith("/commits/feature"):
             return response(200, {"sha": "d" * 40})
         return response(404, {})
