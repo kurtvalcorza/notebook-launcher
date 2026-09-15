@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from pathlib import Path
+import json
 import re
 
 from fastapi.testclient import TestClient
@@ -45,10 +46,10 @@ def make_client(tmp_path: Path):
     return TestClient(create_app(settings, services)), resolver, state
 
 
-def get_token(html: str) -> str:
-    match = re.search(r"const launchToken = '([^']+)'", html)
+def get_token(page: str) -> str:
+    match = re.search(r"const launchToken = (\"[^\"]+\");", page)
     assert match
-    return match.group(1)
+    return json.loads(match.group(1))
 
 
 def launch_request():
