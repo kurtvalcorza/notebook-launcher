@@ -16,6 +16,7 @@
 - Q: If the user and an attached agent edit the same notebook or cell at nearly the same time, how should the launcher handle the conflict? → A: Detect stale/conflicting edits and require refresh/retry rather than silently overwriting either edit.
 - Q: In the default writable agent mode, should the agent be allowed to modify any file inside the persistent workspace, or only notebook files and designated output files? → A: The writable agent may modify any file inside the persistent workspace; host paths outside the workspace remain protected unless explicitly granted.
 - Q: Should a single persistent workspace allow more than one active notebook session at the same time, or only one active session per workspace? → A: Only one active notebook session is allowed per workspace.
+- Q: Should more than one MCP-capable agent be allowed to attach to the same active notebook session at the same time? → A: Only one writable MCP agent may be attached to an active notebook session at a time; another writable agent must wait until the current writable agent disconnects.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -76,6 +77,7 @@ As a user of an MCP-capable coding agent, I can attach the agent to the same not
 7. **Given** the notebook session has stopped, **When** an agent attempts to reconnect, **Then** the attachment is rejected rather than creating an orphan execution environment.
 8. **Given** the user and agent both attempt to save edits derived from different versions of the same notebook or cell, **When** a stale/conflicting write is detected, **Then** the later stale write is rejected and the editor must refresh/retry rather than silently overwrite the other change.
 9. **Given** the default writable agent profile, **When** the agent creates, edits, renames, or deletes files inside the persistent workspace, **Then** those changes are permitted subject to normal workspace conflict and persistence rules, while paths outside the workspace remain unavailable unless explicitly granted.
+10. **Given** one writable MCP agent is already attached, **When** another writable MCP agent attempts to attach to the same active notebook session, **Then** the second writable attachment is rejected until the existing writable agent disconnects.
 
 ---
 
@@ -158,6 +160,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - The user and agent save conflicting edits based on different notebook/cell versions; the stale write is rejected and must be refreshed/retried.
 - A writable agent creates, changes, renames, or deletes non-notebook files inside the persistent workspace; those operations follow the same persistence and conflict rules as other workspace changes.
 - A second session-start request arrives while the workspace already has an active session; no second runtime is created for that workspace.
+- A second writable MCP agent attempts to attach while another writable agent is active; the additional writable attachment is rejected until the current writable agent disconnects.
 - A working notebook is renamed or moved within the allowed workspace.
 - A Save a Copy destination already exists or is outside the allowed destination scope.
 - The local workspace or output storage runs out of disk space.
@@ -217,6 +220,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - **FR-042**: Notebook/cell mutations MUST use conflict detection so a stale user or agent edit cannot silently overwrite a newer saved edit; conflicting writes MUST be rejected and require refresh/retry.
 - **FR-043**: In the default writable profile, the agent MUST be permitted to create, read, modify, rename, and delete files anywhere inside the persistent workspace, subject to workspace conflict/persistence rules; this permission MUST NOT implicitly extend to host paths outside the workspace or explicitly granted local data.
 - **FR-044**: A workspace MUST have at most one active notebook session at a time; a request to start another session for an already-active workspace MUST reuse or direct the user to the existing session, or require it to stop before a replacement session is created.
+- **FR-045**: An active notebook session MUST permit at most one writable MCP agent attachment at a time; a second writable MCP agent MUST be rejected until the current writable agent disconnects or its attachment is invalidated.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -225,7 +229,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - **Workspace**: Persistent local state for one launched source, including provenance, editable files, notebook copies, outputs, and workspace preferences; writable mode treats the full workspace as mutable state and owns at most one active notebook session.
 - **Working Notebook**: The editable local notebook opened and saved by the user and agent; it is separate from immutable source provenance and has a current saved version used for conflict detection.
 - **Output Artifact**: A persistent file produced by notebook execution, such as a model, table, image, checkpoint, report, or exported data file.
-- **Notebook Session**: The disposable active execution context for a workspace; exactly zero or one may be active for a workspace at a time, and it may be stopped and recreated without deleting workspace data.
+- **Notebook Session**: The disposable active execution context for a workspace; exactly zero or one may be active for a workspace at a time, it permits at most one writable MCP agent attachment at a time, and it may be stopped and recreated without deleting workspace data.
 - **Agent Capability Profile**: The effective permission set for an attached agent, including the default writable profile with full workspace write access and the read-only inspection profile.
 - **Local Data Grant**: An optional explicit user-selected local directory and its read-only or read-write access mode.
 - **Agent Activity Record**: Sanitized metadata describing an agent attachment or execution operation without storing full notebook contents by default.
@@ -249,6 +253,7 @@ As a user, I can see whether a launch is preparing, ready, failed, or stopped; s
 - **SC-013**: In a concurrent-edit acceptance test, 100% of stale conflicting notebook/cell writes are rejected rather than silently overwriting the newer saved version.
 - **SC-014**: In writable-mode acceptance testing, the agent can mutate representative notebook and non-notebook files inside the workspace while equivalent attempts against unrelated host paths are denied unless the user explicitly granted those paths.
 - **SC-015**: In workspace-lifecycle acceptance testing, repeated start requests cannot produce more than one active notebook session for the same workspace.
+- **SC-016**: In agent-attachment acceptance testing, a second writable MCP agent cannot attach while another writable MCP agent is active on the same notebook session.
 
 ## Assumptions
 
