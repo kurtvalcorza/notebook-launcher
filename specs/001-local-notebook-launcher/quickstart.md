@@ -19,6 +19,8 @@ For GPU containers, first prove host/container GPU access independently:
 docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 ```
 
+The launcher-managed runtime must also provision JupyterLab collaboration support. A session is not `ready` until collaboration and standard-sandbox readiness checks succeed.
+
 ## Start the launcher
 
 ```bash
@@ -68,6 +70,17 @@ uv run notebook-launcher trust revoke <TRUST_ID>
 
 Verify exact-commit trust prompts again for a different SHA, while repository-wide trust covers later SHAs from the same repository until revoked.
 
+## Environment isolation acceptance
+
+Use a fixture repository whose notebook imports a dependency that is intentionally absent from the unrelated host Python environment.
+
+1. Confirm the dependency import fails from the launcher host environment/fixture interpreter used for the negative check.
+2. Launch the notebook through the normal trust/environment flow.
+3. Confirm the dependency import succeeds inside the notebook kernel.
+4. Confirm the host environment was not modified to make the test pass.
+
+This validates source-declared notebook dependencies independently from unrelated host Python state.
+
 ## Workspace behavior
 
 The remote source is not edited:
@@ -87,6 +100,18 @@ http://127.0.0.1:8080/open?workspace_id=<WORKSPACE_ID>
 
 Verify the existing working copy is reused. While that workspace is already active, a second reopen request must return/direct to the existing session rather than create another runtime.
 
+## Active notebook rename/move acceptance
+
+Rename or move the active notebook through the supported Jupyter/notebook operation.
+
+1. Confirm the move remains inside the workspace and the destination ends in `.ipynb`.
+2. Confirm workspace/status metadata reports the new `active_notebook_path`.
+3. Stop the session and reopen the workspace.
+4. Confirm the new path opens, not the old path.
+5. Move/delete the file outside the supported path as a negative test and confirm the launcher reports the active notebook missing instead of selecting a different notebook automatically.
+
+Generic MCP workspace-file write/move/delete must reject the active notebook path; active-notebook changes use notebook-aware operations.
+
 ## Save a Copy
 
 ```bash
@@ -102,6 +127,17 @@ curl -X POST http://127.0.0.1:8080/api/workspaces/<WORKSPACE_ID>/notebooks/copy 
 ```
 
 Verify both notebooks exist and GitHub remains unchanged.
+
+## Storage-failure acceptance
+
+Automated tests should simulate `ENOSPC`/replacement failure for launcher-managed writes and notebook-save integration.
+
+Expected result:
+
+- the operation fails with an actionable storage error;
+- the previous saved file contents remain intact;
+- no partial temporary file becomes authoritative;
+- workspace metadata does not advance as though the failed write succeeded.
 
 ## Optional local data grant
 
@@ -153,7 +189,9 @@ Readonly:
 &agent_mode=readonly
 ```
 
-Readonly must reject execution, kernel restart, notebook mutation, and workspace-file mutation while allowing notebook/cell/output inspection.
+Readonly must reject execution, execution cancellation, kernel restart, notebook mutation/move, and workspace-file mutation while allowing notebook/cell/output inspection.
+
+The MVP guarantees at most one writable MCP attachment. It does not guarantee simultaneous multiple readonly clients.
 
 ## Attach an MCP agent
 
@@ -182,22 +220,52 @@ Start a second writable MCP bridge for the same session and verify it fails with
 2. Edit/insert a controlled cell using that version.
 3. Execute the cell and observe output in the same Jupyter kernel/browser notebook.
 4. Create, edit, rename, and delete representative non-notebook files inside `/workspace`.
-5. Execute the notebook in order.
-6. Encounter a deliberate failing cell and inspect traceback.
-7. Repair the cell and continue/re-run.
-8. Restart the kernel and execute again.
-9. For GPU sessions, confirm MCP and browser GPU probes agree.
+5. Confirm generic workspace-file write/move/delete rejects the active notebook path.
+6. Rename/move the active notebook through the notebook-aware operation and verify `active_notebook_path` updates.
+7. Execute the notebook in order.
+8. Encounter a deliberate failing cell and inspect traceback.
+9. Repair the cell and continue/re-run.
+10. Restart the kernel and execute again.
+11. For GPU sessions, confirm MCP and browser GPU probes agree.
 
 ## Human/agent conflict acceptance
 
-1. Agent reads a notebook and receives version `V1`.
-2. Human edits/saves the same notebook in JupyterLab so authoritative state becomes `V2`.
+The active notebook uses one authoritative Jupyter collaborative document.
+
+1. Agent reads the notebook and receives version `V1`.
+2. Human edits the same notebook normally in JupyterLab; the shared document advances to `V2`.
 3. Agent attempts a mutation based on `V1`.
-4. Verify the mutation fails as `conflict`, returns/currently exposes the new version, and does not overwrite the human edit.
+4. Verify the mutation fails as `conflict`, exposes/returns the current version, and does not overwrite the human edit.
 5. Agent refreshes, receives `V2`, reapplies a valid mutation, and both browser and disk show the result.
 6. Repeat in the opposite order and verify subsequent browser edits still persist after MCP edits.
+7. Exercise the deliberately stale independent save/file-replacement path and verify it is rejected rather than overwriting the shared document.
 
-This is a backend-conformance gate; silent bidirectional sync loss is a failure.
+This is a backend-conformance gate; silent bidirectional sync loss or stale overwrite is a failure.
+
+## Execution cancellation acceptance
+
+Use a deliberately non-terminating cell, for example:
+
+```python
+while True:
+    pass
+```
+
+1. Start the cell through the writable agent and record its execution operation ID.
+2. Invoke `execution.cancel` before the configured deadline; separately test deadline expiry.
+3. Verify the kernel execution is actually interrupted, not merely relabelled.
+4. Verify the result is distinctly `cancelled` or `timeout`.
+5. If interrupt cannot restore the kernel, verify the bounded recovery path restarts/replaces the kernel without deleting workspace files.
+6. Run a normal cell afterward and confirm the session/workspace remains usable.
+
+## Large/binary/multimodal output acceptance
+
+The default MCP serialized output bound is planned at 1 MiB per operation and is locally configurable.
+
+1. Produce text larger than the configured bound and verify the agent response reports `truncated=true` and size metadata when available.
+2. Produce representative binary/multimodal notebook output and verify MCP returns MIME/type/size metadata plus only a bounded preview/reference representation.
+3. Confirm the full authoritative output remains persisted in the notebook/workspace.
+4. Confirm audit records do not copy the full output payload.
 
 ## Persistence acceptance
 
@@ -211,7 +279,20 @@ This is a backend-conformance gate; silent bidirectional sync loss is a failure.
 
 ## Sandbox/network acceptance
 
-Verify the runtime has only explicit mounts, no Docker socket/SSH/GitHub credentials, and no unrelated host directory access. Outbound package/model/data/API requests may work; Jupyter and launcher services remain loopback-only by default.
+Before allowing the first notebook cell to execute, verify the standard runtime has:
+
+- non-root execution where compatible;
+- no privileged mode;
+- `no-new-privileges`;
+- unnecessary capabilities dropped;
+- seccomp/equivalent filtering active;
+- configured CPU/memory/PID limits;
+- only explicit source/workspace/output/user-data mounts;
+- no Docker socket, SSH keys, GitHub/cloud credentials, whole-home mount, or unrelated host path;
+- a scrubbed environment without unrelated host secrets;
+- Jupyter and launcher-controlled inbound services bound only to loopback.
+
+Then verify outbound package/model/data/API access works by default from the notebook runtime.
 
 ## Trust and threat note
 

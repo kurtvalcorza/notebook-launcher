@@ -7,7 +7,7 @@ The launcher uses two persistence classes:
 - **Filesystem**: immutable source material, mutable workspace files, notebook copies, outputs, and owner-only runtime credential files.
 - **SQLite control state**: trust records, workspace/session lifecycle metadata, active-session ownership, writable-agent leases, document/file version metadata, and bounded audit events.
 
-SQLite rows never contain full notebook/cell contents or raw Jupyter credentials.
+SQLite rows never contain full notebook/cell contents, large/binary output payloads, or raw Jupyter credentials.
 
 ## LaunchRequest
 
@@ -91,12 +91,17 @@ Persistent user state independent from runtime lifetime.
 | `root_path` | local path | Launcher-managed root |
 | `work_path` | local path | Persistent mutable workspace |
 | `outputs_path` | local path | Persistent generated artifacts |
-| `active_notebook_path` | string | Workspace-relative current notebook |
+| `active_notebook_path` | string | Workspace-relative current notebook; updated by supported Jupyter rename/move |
 | `created_at` | datetime | Creation time |
 | `updated_at` | datetime | Last meaningful update |
 | `user_data_grant_id` | UUID? | Optional explicit mount grant |
 
-Invariant: stopping/removing a runtime never deletes the workspace. A workspace owns zero or one active `NotebookSession`.
+Invariants:
+
+- stopping/removing a runtime never deletes the workspace;
+- a workspace owns zero or one active `NotebookSession`;
+- a supported active-notebook rename/move updates `active_notebook_path` before the operation is considered complete;
+- if the recorded active path disappears through an unsupported external move, the launcher reports the missing notebook rather than guessing another file.
 
 ## SourceSnapshot
 
@@ -147,12 +152,14 @@ Disposable runtime record.
 | `gpu_enabled` | boolean | Effective GPU allocation |
 | `agent_mode` | enum | `write` or `readonly` maximum policy |
 | `sandbox_profile` | string | MVP: `standard` |
+| `sandbox_verified` | boolean | True only after mandatory standard-sandbox assertions succeed |
+| `collaboration_ready` | boolean | True only after shared-document collaboration readiness succeeds |
 | `notebook_url` | string | Browser target/redirect data |
 | `state` | enum | `starting`, `ready`, `stopping`, `stopped`, `failed` |
 | `started_at` | datetime | Start time |
 | `stopped_at` | datetime? | Terminal time |
 
-Database invariant: at most one session in an active state may reference the same workspace. Raw Jupyter token/URL credentials are held only in owner-only runtime-private state, not ordinary database/API records.
+Database invariant: at most one session in an active state may reference the same workspace. A session cannot become `ready` until the mandatory sandbox and collaboration readiness gates have passed. Raw Jupyter token/URL credentials are held only in owner-only runtime-private state, not ordinary database/API records.
 
 ## DocumentVersion
 
@@ -169,10 +176,28 @@ Opaque optimistic-concurrency state for a mutable notebook/file.
 
 Rules:
 
-- reads return the current opaque version;
-- mutations of an existing object require `expected_version`;
+- active notebook version derives from the authoritative Jupyter collaborative document;
+- normal JupyterLab browser edits update that authoritative document/version rather than replacing it from an independent stale copy;
+- agent notebook mutations require `expected_document_version`;
+- any independent full-document/file save path capable of replacing the active notebook must carry/derive a version precondition and is rejected if stale;
+- non-notebook existing-object mutations require `expected_file_version`;
 - a mismatched version is rejected as conflict before mutation;
-- notebook version derives from authoritative Jupyter collaborative/document state when active rather than an independent stale file view.
+- generic workspace file write/move/delete does not operate on the active notebook path; active-notebook mutation/move is notebook-aware.
+
+## WritableAgentLease
+
+Transactional ownership record for writable MCP control.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | UUID | Lease ID |
+| `session_id` | UUID | Notebook session |
+| `client_label` | string? | Optional sanitized caller label |
+| `acquired_at` | datetime | Acquire time |
+| `heartbeat_at` | datetime? | Optional liveness update |
+| `released_at` | datetime? | Null while active |
+
+Invariant: at most one unreleased writable lease exists for an active session. Session stop invalidates/releases it. Read-only attachments do not consume the writable lease; simultaneous multi-readonly attachment is not an MVP guarantee.
 
 ## McpAttachment
 
@@ -193,24 +218,28 @@ Public non-secret descriptor for attaching to a ready session.
 
 Raw Jupyter credentials are forbidden from this descriptor.
 
-## WritableAgentLease
+## ExecutionControl
 
-Transactional ownership record for writable MCP control.
+Ephemeral runtime state for one agent execution request.
 
 | Field | Type | Notes |
 |---|---|---|
-| `id` | UUID | Lease ID |
-| `session_id` | UUID | Notebook session |
-| `client_label` | string? | Optional sanitized caller label |
-| `acquired_at` | datetime | Acquire time |
-| `heartbeat_at` | datetime? | Optional liveness update |
-| `released_at` | datetime? | Null while active |
+| `operation_id` | UUID | Execution identity |
+| `session_id` | UUID | Owning notebook session |
+| `started_at` | datetime | Start time |
+| `deadline_at` | datetime? | Configured timeout deadline |
+| `cancel_requested_at` | datetime? | Explicit cancel request time |
+| `state` | enum | `running`, `interrupting`, `completed`, `failed`, `timeout`, `cancelled` |
 
-Invariant: at most one unreleased writable lease exists for an active session. Session stop invalidates/releases it. Read-only attachment records do not consume the writable lease.
+Rules:
+
+- cancellation/deadline expiry interrupts the active kernel execution;
+- if the kernel does not recover inside the grace interval, runtime policy may restart/replace the kernel while preserving workspace files;
+- cancellation state is ephemeral and need not be retained after bounded audit metadata is written.
 
 ## McpRuntimeState
 
-Owner-only ephemeral state used by `notebook-launcher mcp <session-id>`: session ID, loopback Jupyter URL, Jupyter token, workspace/notebook path, backend configuration, effective permission profile, and lease ID when writable. It expires with session stop.
+Owner-only ephemeral state used by `notebook-launcher mcp <session-id>`: session ID, loopback Jupyter URL, Jupyter token, workspace/notebook path, backend configuration, effective permission profile, lease ID when writable, and active execution-control handles. It expires with session stop.
 
 ## NotebookCopyRequest
 
@@ -236,17 +265,39 @@ Owner-only ephemeral state used by `notebook-launcher mcp <session-id>`: session
 | `outcome` | enum? | `success`, `failure`, `conflict`, `timeout`, `cancelled` |
 | `error_type` | string? | Sanitized category |
 
-Full cell source/output is not logged by default.
+Full cell source/output, binary/multimodal payloads, and raw credentials are not logged by default.
+
+## OutputEnvelope
+
+Bounded agent-facing representation of notebook output.
+
+| Field | Type | Notes |
+|---|---|---|
+| `mime_type` | string? | Output MIME/type when applicable |
+| `serialized_size` | integer? | Size when known |
+| `payload` | string/object? | Bounded text/preview/reference representation |
+| `truncated` | boolean | True when full payload exceeds configured bound |
+| `authoritative_location` | string? | Non-secret notebook/cell/artifact reference when available |
+
+Default launcher limit: 1 MiB serialized agent response payload per operation, configurable locally. The full authoritative notebook output remains in the notebook/workspace.
+
+## Persistent-write safety
+
+Launcher-managed replacement writes and Jupyter notebook saves use atomic/safe replacement behavior appropriate to the filesystem. On `ENOSPC` or comparable write failure, the operation reports failure and leaves the prior saved file intact. Partial temporary files may be cleaned up but MUST NOT become the authoritative replacement.
 
 ## Lifecycle invariants
 
 1. A fresh remote launch creates a new workspace after trust approval.
 2. A workspace has zero or one active notebook session.
 3. An active session has zero or one writable agent lease.
-4. Browser and MCP use the same authoritative notebook document/kernel.
-5. A stale notebook/file mutation is rejected rather than overwriting newer state.
-6. Runtime stop invalidates credentials and writable lease but preserves workspace and environment cache.
-7. Trust revocation affects future launch authorization; it does not silently terminate an already-running trusted session.
+4. A session is not `ready` until the complete standard sandbox and Jupyter collaboration gates pass.
+5. Browser and MCP use the same authoritative notebook document/kernel.
+6. A stale notebook/file mutation or stale independent active-notebook save is rejected rather than overwriting newer state.
+7. Generic workspace file operations cannot bypass the active notebook document/version boundary.
+8. A supported active-notebook rename/move updates workspace metadata; unsupported disappearance fails clearly.
+9. Runtime stop invalidates credentials and writable lease but preserves workspace and environment cache.
+10. Timeout/cancellation terminates the requested execution without deleting the workspace.
+11. Trust revocation affects future launch authorization; it does not silently terminate an already-running trusted session.
 
 ## Cache vs persistence
 
@@ -254,4 +305,4 @@ Full cell source/output is not logged by default.
 - **Source cache/snapshot**: immutable provenance material.
 - **Workspace**: persistent user edits/outputs; survives runtime stop.
 - **Control database**: durable local metadata, trust, versions, leases, audit.
-- **Runtime private state**: ephemeral credentials/process metadata; invalidated on stop.
+- **Runtime private state**: ephemeral credentials/process/cancellation metadata; invalidated on stop.
