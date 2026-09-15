@@ -125,6 +125,8 @@ CREATE TABLE IF NOT EXISTS user_data_grants (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
     display_path TEXT NOT NULL,
     canonical_root TEXT NOT NULL,
+    root_dev INTEGER,
+    root_ino INTEGER,
     container_path TEXT NOT NULL DEFAULT '/mnt/user-data',
     mode TEXT NOT NULL CHECK (mode IN ('ro','rw')),
     created_at TEXT NOT NULL,
@@ -153,6 +155,19 @@ class StateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._ensure_column(conn, "user_data_grants", "root_dev", "INTEGER")
+            self._ensure_column(conn, "user_data_grants", "root_ino", "INTEGER")
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

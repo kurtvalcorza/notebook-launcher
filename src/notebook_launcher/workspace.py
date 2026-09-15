@@ -5,7 +5,6 @@ import os
 import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO
 
 from .errors import HostPathEscape, StorageFull
 
@@ -14,7 +13,7 @@ def canonical_grant_root(path: Path, *, home: Path | None = None) -> Path:
     root = path.expanduser().resolve(strict=True)
     if not root.is_dir():
         raise ValueError("granted path must be a directory")
-    if home is not None and root == home.expanduser().resolve(strict=True):
+    if home is not None and root == home.expanduser().resolve(strict=False):
         raise ValueError("whole home directory cannot be granted")
     return root
 
@@ -35,13 +34,7 @@ def safe_open_under_root(
     flags: int,
     mode: int = 0o600,
 ) -> int:
-    """Open a path beneath root without following symlinks in any component.
-
-    Linux/Unix implementation using directory file descriptors. The caller owns
-    the returned fd. This is intentionally fail-closed on platforms lacking
-    O_NOFOLLOW/O_DIRECTORY; platform-specific Windows reparse handling remains
-    a local-runtime task.
-    """
+    """Open a path beneath root without following symlinks in any component."""
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise RuntimeError("safe no-follow path opening is unsupported on this platform")
 
@@ -99,8 +92,7 @@ def atomic_write(path: Path, data: bytes, *, overwrite: bool = True) -> None:
 def save_copy(source: Path, destination: Path, *, overwrite: bool = False) -> None:
     if destination.exists() and not overwrite:
         raise FileExistsError(destination)
-    data = source.read_bytes()
-    atomic_write(destination, data, overwrite=overwrite)
+    atomic_write(destination, source.read_bytes(), overwrite=overwrite)
 
 
 def materialize_workspace(source_root: Path, work_root: Path) -> None:

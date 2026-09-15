@@ -16,6 +16,8 @@ class GrantRecord:
     workspace_id: UUID
     display_path: Path
     canonical_root: Path
+    root_dev: int
+    root_ino: int
     mode: str
     created_at: datetime
     revoked_at: datetime | None = None
@@ -44,6 +46,7 @@ class UserDataGrantStore:
         if mode not in {"ro", "rw"}:
             raise ValueError("mode must be ro or rw")
         canonical = canonical_grant_root(path, home=home)
+        stat = canonical.stat()
         grant_id = uuid4()
         now = datetime.now(UTC)
         try:
@@ -52,14 +55,16 @@ class UserDataGrantStore:
                     """
                     INSERT INTO user_data_grants (
                         id, workspace_id, display_path, canonical_root,
-                        container_path, mode, created_at
-                    ) VALUES (?, ?, ?, ?, '/mnt/user-data', ?, ?)
+                        root_dev, root_ino, container_path, mode, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, '/mnt/user-data', ?, ?)
                     """,
                     (
                         str(grant_id),
                         str(workspace_id),
                         str(path),
                         str(canonical),
+                        stat.st_dev,
+                        stat.st_ino,
                         mode,
                         now.isoformat(),
                     ),
@@ -71,6 +76,8 @@ class UserDataGrantStore:
             workspace_id=workspace_id,
             display_path=path,
             canonical_root=canonical,
+            root_dev=stat.st_dev,
+            root_ino=stat.st_ino,
             mode=mode,
             created_at=now,
         )
@@ -86,11 +93,15 @@ class UserDataGrantStore:
             ).fetchone()
         if row is None:
             return None
+        if row["root_dev"] is None or row["root_ino"] is None:
+            raise RuntimeError("data grant predates filesystem-identity tracking; re-grant required")
         return GrantRecord(
             id=UUID(row["id"]),
             workspace_id=UUID(row["workspace_id"]),
             display_path=Path(row["display_path"]),
             canonical_root=Path(row["canonical_root"]),
+            root_dev=int(row["root_dev"]),
+            root_ino=int(row["root_ino"]),
             mode=row["mode"],
             created_at=datetime.fromisoformat(row["created_at"]),
             revoked_at=None,
@@ -101,7 +112,13 @@ class UserDataGrantStore:
         if record is None:
             return None
         current = record.display_path.expanduser().resolve(strict=True)
-        if current != record.canonical_root or not current.is_dir():
+        stat = current.stat()
+        if (
+            current != record.canonical_root
+            or not current.is_dir()
+            or stat.st_dev != record.root_dev
+            or stat.st_ino != record.root_ino
+        ):
             raise RuntimeError("granted directory identity changed or became unavailable")
         return record
 
