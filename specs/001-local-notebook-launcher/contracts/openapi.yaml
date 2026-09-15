@@ -1,0 +1,297 @@
+openapi: 3.1.0
+info:
+  title: Notebook Launcher Local API
+  version: 0.5.0
+servers:
+  - url: http://127.0.0.1:8080
+paths:
+  /open:
+    get:
+      summary: Resolve and preview a launch or workspace reopen without executing it
+      description: >-
+        This endpoint is intentionally non-executing. It may validate/normalize the request,
+        resolve public GitHub repository metadata/ref to stable repository ID + immutable SHA,
+        and render a local preview containing a short-lived request-bound launch authorization token.
+        GET must not start repo2docker, repository setup, Jupyter, a kernel, or notebook code.
+      parameters:
+        - name: url
+          in: query
+          schema: { type: string, format: uri }
+        - name: repo
+          in: query
+          schema: { type: string, pattern: '^[^/]+/[^/]+$' }
+        - name: ref
+          in: query
+          schema: { type: string }
+        - name: path
+          in: query
+          schema: { type: string }
+        - name: workspace_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: gpu
+          in: query
+          schema: { type: string, enum: [auto, on, off], default: auto }
+        - name: agent_mode
+          in: query
+          schema: { type: string, enum: [write, readonly], default: write }
+      responses:
+        '200':
+          description: Local non-executing launch preview/authorization page
+          headers:
+            Content-Security-Policy:
+              schema: { type: string }
+              description: Must include frame-ancestors 'none'
+            X-Frame-Options:
+              schema: { type: string, enum: [DENY] }
+        '400': { description: Invalid or unsafe request }
+        '404': { description: Unknown workspace/source }
+        '422': { description: Conflicting/incomplete parameters }
+  /api/launches:
+    post:
+      summary: Consume a one-time local launch authorization and begin/reuse a session
+      description: >-
+        Requires the short-lived request-bound launch token from the local GET /open preview.
+        Existing source trust skips only the trust-selection step; it never removes this launch-authorization requirement.
+        The server validates same-origin/loopback request context and token replay/request binding before side effects.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuthorizedLaunchRequest' }
+      responses:
+        '202':
+          description: Launch authorization consumed; launch created or awaiting trust
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LaunchStatus' }
+        '200':
+          description: Workspace already active; existing session returned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LaunchStatus' }
+        '400': { description: Invalid/expired/replayed/mismatched launch token or unsafe request context }
+        '404': { description: Source/workspace changed or no longer exists }
+        '409': { description: Request cannot be reconciled with active workspace/session }
+  /api/launches/{launch_id}:
+    get:
+      summary: Get launch state
+      parameters:
+        - $ref: '#/components/parameters/LaunchId'
+      responses:
+        '200':
+          description: Launch state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LaunchStatus' }
+        '404': { description: Unknown launch }
+  /api/launches/{launch_id}/trust:
+    post:
+      summary: Resolve a source trust challenge after launch authorization
+      description: >-
+        Source trust is distinct from launch authorization. The trust nonce is rendered locally only
+        for an already-authorized launch that is awaiting trust.
+      parameters:
+        - $ref: '#/components/parameters/LaunchId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, confirmation_nonce]
+              properties:
+                decision:
+                  type: string
+                  enum: [trust_exact_commit, trust_repository, deny]
+                confirmation_nonce:
+                  type: string
+                  minLength: 16
+      responses:
+        '200': { description: Trust decision recorded; launch may continue or terminate }
+        '400': { description: Invalid/expired/used nonce or source identity mismatch }
+        '409': { description: Launch is not awaiting trust }
+  /api/trust:
+    get:
+      summary: List active local trust grants
+      responses:
+        '200':
+          description: Active grants keyed by stable repository identity
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TrustRecord' }
+  /api/trust/{trust_id}:
+    delete:
+      summary: Revoke a trust grant for future launches
+      parameters:
+        - $ref: '#/components/parameters/TrustId'
+      responses:
+        '204': { description: Revoked }
+        '404': { description: Unknown trust grant }
+  /api/workspaces/{workspace_id}:
+    get:
+      summary: Get persistent workspace metadata
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Workspace metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workspace' }
+        '404': { description: Unknown workspace }
+  /api/workspaces/{workspace_id}/notebooks/copy:
+    post:
+      summary: Save a copy within allowed persistent storage
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotebookCopyRequest' }
+      responses:
+        '201': { description: Copy created }
+        '400': { description: Invalid/traversing/read-only/symlink-escaping destination }
+        '409': { description: Destination exists and overwrite=false }
+        '507': { description: Storage failure; previous authoritative file preserved }
+  /api/sessions/{session_id}/mcp:
+    get:
+      summary: Get non-secret MCP attachment descriptor
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Descriptor only; retrieving it does not acquire writable lease
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/McpAttachment' }
+        '404': { description: Unknown session }
+        '409': { description: Session not ready }
+        '410': { description: Session stopped/invalidated }
+  /api/sessions/{session_id}:
+    delete:
+      summary: Stop runtime while preserving workspace/cache
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '204': { description: Runtime stopped; workspace preserved; agent state invalidated }
+        '404': { description: Unknown session }
+  /health:
+    get:
+      summary: Launcher health
+      responses:
+        '200': { description: Service running }
+components:
+  parameters:
+    LaunchId:
+      name: launch_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    WorkspaceId:
+      name: workspace_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TrustId:
+      name: trust_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    AuthorizedLaunchRequest:
+      type: object
+      required: [launch_token]
+      properties:
+        launch_token:
+          type: string
+          minLength: 32
+          description: Short-lived one-time token returned only in local preview page; token binds the normalized request.
+    LaunchStatus:
+      type: object
+      required: [id, phase, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        phase:
+          type: string
+          enum: [received, awaiting_trust, acquiring, workspace_preparing, building, cache_hit, starting, mcp_preparing, ready, failed, stopping, stopped]
+        message: { type: [string, 'null'] }
+        error_code: { type: [string, 'null'] }
+        repository_id: { type: [integer, 'null'] }
+        repository: { type: [string, 'null'] }
+        commit_sha: { type: [string, 'null'] }
+        workspace_id: { type: [string, 'null'], format: uuid }
+        notebook_path: { type: [string, 'null'] }
+        session_id: { type: [string, 'null'], format: uuid }
+        existing_session_id: { type: [string, 'null'], format: uuid }
+        ready_url: { type: [string, 'null'], format: uri }
+        gpu_enabled: { type: [boolean, 'null'] }
+        agent_mode: { type: [string, 'null'], enum: [write, readonly, null] }
+        mcp_available: { type: [boolean, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TrustRecord:
+      type: object
+      required: [id, repository_id, repository, scope, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        repository_id: { type: integer, minimum: 1 }
+        repository_node_id: { type: [string, 'null'] }
+        repository: { type: string, examples: [owner/repo] }
+        grant_repository: { type: string, examples: [owner/repo] }
+        scope: { type: string, enum: [exact_commit, repository] }
+        commit_sha: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+    Workspace:
+      type: object
+      required: [id, repository_id, repository, commit_sha, active_notebook_path, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        repository_id: { type: integer }
+        repository: { type: string }
+        commit_sha: { type: string }
+        active_notebook_path: { type: string }
+        outputs_path: { type: string }
+        active_session_id: { type: [string, 'null'], format: uuid }
+        user_data_mounted: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    NotebookCopyRequest:
+      type: object
+      required: [source_path, destination_scope, destination_path]
+      properties:
+        source_path: { type: string }
+        destination_scope: { type: string, enum: [workspace, user_data] }
+        destination_path: { type: string }
+        include_outputs: { type: boolean, default: true }
+        overwrite: { type: boolean, default: false }
+    McpAttachment:
+      type: object
+      required: [session_id, available, status, transport, agent_mode, capabilities, notebook_path]
+      properties:
+        session_id: { type: string, format: uuid }
+        notebook_path:
+          type: string
+          description: Launcher-designated active notebook; browser focus does not alter this target.
+        available: { type: boolean }
+        status: { type: string, enum: [unavailable, available, attaching, attached, error, invalidated] }
+        transport: { type: string, examples: [stdio] }
+        command: { type: [string, 'null'], examples: [notebook-launcher] }
+        args:
+          type: array
+          items: { type: string }
+        backend: { type: [string, 'null'] }
+        agent_mode: { type: string, enum: [write, readonly] }
+        write_lease_available: { type: [boolean, 'null'] }
+        capabilities:
+          type: array
+          items: { type: string }
+        message: { type: [string, 'null'] }
