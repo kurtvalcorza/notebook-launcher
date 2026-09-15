@@ -1,415 +1,243 @@
 # Tasks: Local Notebook Launcher
 
-**Input**: Design documents from `specs/001-local-notebook-launcher/`
+**Input**: `spec.md`, `plan.md`, `research.md`, `data-model.md`, `contracts/`, `quickstart.md`
 
-**Prerequisites**: `plan.md`, `spec.md`, `research.md`, `data-model.md`, `contracts/`, `quickstart.md`
+**Tests**: Required by constitution and specification. Story tests are written before corresponding implementation.
 
-**Tests**: Required by the project constitution. Test tasks are included before implementation in each story where the constitution or feature acceptance criteria require automated/contract/integration coverage.
+## Format
 
-**Organization**: Tasks are grouped by the seven user stories in `spec.md`, with shared setup/foundational work first and cross-cutting acceptance work last.
-
-## Format: `[ID] [P?] [Story] Description`
-
-- **[P]**: Can run in parallel because it changes different files and does not depend on another incomplete task in the same phase.
-- **[Story]**: Maps directly to `US1`–`US7` from `spec.md`.
-- Every task includes an exact repository path.
+`[ID] [P?] [Story?] Description with exact path`
 
 ---
 
-## Phase 1: Setup (Shared Infrastructure)
+## Phase 1 — Setup
 
-**Purpose**: Initialize the Python package, test harness, local configuration, and developer-facing entry points.
+- [ ] T001 Create Python 3.12+ project/dependency/console-script configuration in `pyproject.toml`
+- [ ] T002 Create package/version bootstrap in `src/notebook_launcher/__init__.py`
+- [ ] T003 [P] Create pytest fixtures for temporary launcher roots, SQLite, fake GitHub source metadata, Docker markers, and Jupyter markers in `tests/conftest.py`
+- [ ] T004 [P] Implement paths, loopback defaults, resource limits, execution timeout/grace, output bound, launch-token lifetime, and backend settings in `src/notebook_launcher/config.py`
+- [ ] T005 [P] Create FastAPI app/lifecycle skeleton in `src/notebook_launcher/app.py`
+- [ ] T006 [P] Create CLI skeleton for `serve`, `mcp`, `trust`, `workspace` in `src/notebook_launcher/cli.py`
+- [ ] T007 [P] Document host prerequisites and trust/sandbox/network limitations in `README.md`
 
-- [ ] T001 Create `pyproject.toml` for Python 3.12+ with FastAPI, Uvicorn, Pydantic, pytest, pytest-asyncio, httpx, repo2docker integration dependencies, JupyterLab/`jupyter-collaboration` runtime integration dependencies, and console script `notebook-launcher = notebook_launcher.cli:main`
-- [ ] T002 Create package bootstrap and version metadata in `src/notebook_launcher/__init__.py`
-- [ ] T003 [P] Create test bootstrap, temporary launcher-root fixtures, temporary SQLite fixtures, and marker definitions in `tests/conftest.py`
-- [ ] T004 [P] Implement launcher-root/state/workspace/runtime path settings, loopback defaults, standard-sandbox resource limits, default MCP execution timeout/cancel grace interval, 1 MiB default MCP output bound, and backend configuration in `src/notebook_launcher/config.py`
-- [ ] T005 [P] Create the FastAPI application factory and startup/shutdown lifecycle skeleton in `src/notebook_launcher/app.py`
-- [ ] T006 [P] Create CLI command skeletons for `serve`, `mcp`, `trust`, and `workspace` groups in `src/notebook_launcher/cli.py`
-- [ ] T007 [P] Create initial host-prerequisite, trust-boundary, complete-standard-sandbox requirements, and sandbox-limitations documentation in `README.md`
-
-**Checkpoint**: Package imports, test discovery, CLI help, and app startup work without implementing feature behavior.
-
----
-
-## Phase 2: Foundational (Blocking Prerequisites)
-
-**Purpose**: Build the durable local control-plane primitives that every user story depends on.
-
-**⚠️ CRITICAL**: Complete this phase before user-story implementation.
+## Phase 2 — Foundational control state
 
 ### Tests
 
-- [ ] T008 [P] Add unit tests for typed public error identifiers, safe-message serialization, and secret redaction in `tests/unit/test_errors.py`
-- [ ] T009 [P] Add SQLite schema/invariant tests proving active exact-commit trust uniqueness, active repository-trust uniqueness, at-most-one active session per workspace, at-most-one unreleased writable lease per session, and transactional rollback in `tests/unit/test_state.py`
-- [ ] T010 [P] Add model validation tests for launch-source mutual exclusivity, `gpu=auto|on|off`, `agent_mode=write|readonly`, normalized relative paths, lifecycle enums, sandbox/collaboration readiness flags, execution outcomes, and bounded-output metadata in `tests/unit/test_models.py`
-- [ ] T011 [P] Add audit tests proving bounded metadata excludes raw notebook contents, Jupyter tokens, credentials, and full large/binary/multimodal output payloads in `tests/unit/test_audit.py`
+- [ ] T008 [P] Test typed secret-safe errors including launch-token, repo-identity, network-policy, host-path-escape, execution-cancel errors in `tests/unit/test_errors.py`
+- [ ] T009 [P] Test SQLite invariants for trust, launch-token replay, one active session/workspace, one writable lease/session, rollback in `tests/unit/test_state.py`
+- [ ] T010 [P] Test request/model enums, normalized paths, stable repo ID, execution states, bounded output models in `tests/unit/test_models.py`
+- [ ] T011 [P] Test bounded audit redaction for notebook/output/credential payloads in `tests/unit/test_audit.py`
 
 ### Implementation
 
-- [ ] T012 [P] Implement stable typed launcher errors including `conflict`, `permission_denied`, `writable_agent_busy`, `workspace_active`, `unknown_session`, `storage_full`, `execution_timeout`, `execution_cancelled`, and secret-safe rendering in `src/notebook_launcher/errors.py`
-- [ ] T013 [P] Implement Pydantic/domain models for `LaunchRequest`, `ResolvedSource`, `Launch`, `Workspace`, `NotebookSession`, `McpAttachment`, `NotebookCopyRequest`, `UserDataGrant`, `ExecutionControl`, bounded output envelopes, and execution outcomes in `src/notebook_launcher/models.py`; preserve constraints `gpu ∈ {auto,on,off}`, `agent_mode ∈ {write,readonly}`, and remote-source fields mutually exclusive with `workspace_id`
-- [ ] T014 Implement SQLite schema/bootstrap and transactional repository helpers in `src/notebook_launcher/state.py`, including partial/transactional uniqueness for one active session per workspace and one unreleased writable lease per session and excluding raw notebook/Jupyter-secret/output-payload storage
-- [ ] T015 [P] Implement sanitized bounded audit-event persistence with operation, target identifier, timing, outcome, and error category only in `src/notebook_launcher/audit.py`
-- [ ] T016 [P] Implement opaque notebook/file version token primitives, compare-before-write helpers, and active-notebook generic-file guard helpers in `src/notebook_launcher/versions.py`
-- [ ] T017 [P] Implement transactional writable-agent lease acquire/release/invalidate/reconcile primitives in `src/notebook_launcher/leases.py`
-- [ ] T018 [P] Implement structured external-command execution helpers using argv APIs only, cancellation, bounded stdout/stderr capture, and redaction in `src/notebook_launcher/orchestration.py`
-- [ ] T019 Implement base launch-state persistence/transitions for `received`, `resolving`, `awaiting_trust`, `acquiring`, `workspace_preparing`, `building`, `cache_hit`, `starting`, `mcp_preparing`, `ready`, `failed`, `stopping`, and `stopped` in `src/notebook_launcher/state.py`
-- [ ] T020 [P] Implement host diagnostics for Git, Docker Engine, repo2docker, writable launcher state directory, Jupyter collaboration availability, and configured MCP backend availability in `src/notebook_launcher/environment.py`
-- [ ] T021 Run and fix foundational unit suite in `tests/unit/test_errors.py`, `tests/unit/test_state.py`, `tests/unit/test_models.py`, and `tests/unit/test_audit.py`
-
-**Checkpoint**: Atomic local metadata, versions, leases, errors, audit, diagnostics, and lifecycle primitives are ready for story work.
+- [ ] T012 [P] Implement public typed errors in `src/notebook_launcher/errors.py`
+- [ ] T013 [P] Implement domain/API models including `LaunchPreview`, `ResolvedSource`, `TrustRecord`, `ExecutionOperation`, `NetworkPolicyState`, and canonical `UserDataGrant` in `src/notebook_launcher/models.py`
+- [ ] T014 Implement SQLite schema/repositories including token replay, stable repo trust, session ownership, leases, versions, audit metadata in `src/notebook_launcher/state.py`
+- [ ] T015 [P] Implement bounded sanitized audit persistence in `src/notebook_launcher/audit.py`
+- [ ] T016 [P] Implement document/file version primitives and active-notebook generic-file guard in `src/notebook_launcher/versions.py`
+- [ ] T017 [P] Implement writable lease acquire/release/reconcile in `src/notebook_launcher/leases.py`
+- [ ] T018 [P] Implement structured argv subprocess helper with cancellation/redaction/bounded logs in `src/notebook_launcher/orchestration.py`
+- [ ] T019 Implement launch/session state transitions in `src/notebook_launcher/state.py`
+- [ ] T020 [P] Implement host diagnostics for Git/Docker/repo2docker/Jupyter collaboration/MCP/GPU/network-policy capability in `src/notebook_launcher/environment.py`
+- [ ] T021 Run/fix foundational tests in `tests/unit/`
 
 ---
 
-## Phase 3: User Story 1 - Open a Trusted GitHub Notebook Locally (Priority: P1) 🎯 MVP Entry
+## Phase 3 — US1 Trusted source preview, authorization, trust, first open (P1)
 
-**Goal**: Accept a supported public GitHub notebook reference, resolve immutable provenance, obtain explicit trust when needed, prepare an isolated environment, apply the complete standard sandbox, and open the exact notebook locally with Jupyter collaboration ready.
+### Tests
 
-**Independent Test**: Submit a known public GitHub `.ipynb`, choose exact-commit or repository trust, and verify the exact working notebook opens in a loopback Jupyter session; declining trust executes no repository-supplied setup/code; a fixture dependency absent from host is available in the notebook; mandatory sandbox assertions pass before the first cell executes.
+- [ ] T022 [P] [US1] Test GitHub URL/ref/path parsing, traversal, unsupported hosts, slash-containing refs in `tests/unit/test_source.py`
+- [ ] T023 [P] [US1] Test stable GitHub repository ID resolution and owner/name rename/transfer/recreation cases in `tests/unit/test_source_identity.py`
+- [ ] T024 [P] [US1] Test launch-token signature, expiry, request binding, JTI replay, token-not-in-GET, same-origin/local checks in `tests/unit/test_launch_auth.py`
+- [ ] T025 [P] [US1] Test exact-commit/repository trust keyed by stable repository ID and rename/transfer/recreation behavior in `tests/unit/test_trust.py`
+- [ ] T026 [P] [US1] Contract-test non-executing `GET /open`, side-effecting `POST /api/launches`, trust/status routes in `tests/contract/test_launch_api.py`
+- [ ] T027 [P] [US1] Integration-test that GET `/open` causes zero build/setup/runtime/kernel/notebook execution for untrusted and already-trusted sources in `tests/integration/test_open_preview_no_execution.py`
+- [ ] T028 [P] [US1] Integration-test cross-site navigation/form/iframe-style drive-by attempts cannot execute and preview is anti-frame protected in `tests/integration/test_launch_driveby.py`
+- [ ] T029 [P] [US1] Integration-test deny/cancel trust gives zero repository setup/notebook execution in `tests/integration/test_trust_gate.py`
+- [ ] T030 [P] [US1] Docker-backed integration-test exact notebook/provenance/source-dependency isolation/full sandbox+network gate before first cell in `tests/integration/test_open_notebook.py`
+- [ ] T031 [P] [US1] Test environment cache reuse without mutable workspace reuse in `tests/integration/test_environment_cache.py`
 
-### Tests for User Story 1
+### Implementation
 
-- [ ] T022 [P] [US1] Add GitHub URL/repo-ref-path parsing, slash-containing ref resolution, unsupported-host, non-`.ipynb`, and traversal tests in `tests/unit/test_source.py`
-- [ ] T023 [P] [US1] Add trust-policy tests for `scope=exact_commit|repository`, exact-commit requiring `commit_sha`, repository scope using null commit SHA, revocation, expired/used nonce rejection, and remote inability to pre-authorize trust in `tests/unit/test_trust.py`
-- [ ] T024 [P] [US1] Add `/open`, launch-status, trust-challenge, trust-list, and trust-revoke OpenAPI contract tests in `tests/contract/test_launch_trust_api.py`
-- [ ] T025 [P] [US1] Add integration test proving no repository-supplied build/runtime command executes before trust and deny/cancel results in zero repository execution in `tests/integration/test_trust_gate.py`
-- [ ] T026 [P] [US1] Add Docker-backed source-to-Jupyter integration test that opens the exact requested working notebook, records immutable commit provenance, proves a source-declared dependency absent from unrelated host Python is available only inside the prepared notebook environment, and asserts the complete standard sandbox controls are active before any notebook cell executes in `tests/integration/test_open_notebook.py`
-- [ ] T027 [P] [US1] Add environment-cache integration test proving an unchanged immutable source/environment reuses its prepared image without reusing a prior mutable workspace in `tests/integration/test_environment_cache.py`
-
-### Implementation for User Story 1
-
-- [ ] T028 [P] [US1] Implement strict `github.com` notebook parsing, explicit `owner/repository + ref + path` parsing, path normalization, non-notebook rejection, and validated HTTPS clone URL construction in `src/notebook_launcher/source.py`
-- [ ] T029 [US1] Implement remote-ref resolution to immutable commit SHA, including slash-containing branch names resolved against remote refs rather than naïve `/blob/` splitting, in `src/notebook_launcher/source.py`
-- [ ] T030 [P] [US1] Implement active trust-record lookup/create/revoke in `src/notebook_launcher/trust.py` with scopes exactly `exact_commit` and `repository`; exact-commit grants authorize one SHA and repository grants authorize future SHAs only for the same canonical repository
-- [ ] T031 [US1] Implement short-lived one-time `TrustChallenge` nonce creation/verification in `src/notebook_launcher/trust.py`, storing only the nonce hash and ensuring `/open` query parameters cannot supply authorization
-- [ ] T032 [US1] Implement immutable source acquisition/cache at the resolved SHA in `src/notebook_launcher/repository.py` using structured Git argv and validating the requested notebook exists after acquisition
-- [ ] T033 [US1] Implement fresh workspace materialization for a newly trusted source in `src/notebook_launcher/workspace.py`, creating separate persistent `work/` and `outputs/` while retaining immutable source provenance
-- [ ] T034 [P] [US1] Implement deterministic environment identity from commit SHA, repo2docker strategy/version, and environment-defining inputs in `src/notebook_launcher/environment.py`
-- [ ] T035 [US1] Implement prepared-image cache lookup and repo2docker build on cache miss using structured argv, redacted progress, and actionable build failures in `src/notebook_launcher/environment.py`
-- [ ] T036 [US1] Implement the complete constitution-required `standard` sandbox in `src/notebook_launcher/sandbox.py` before any Jupyter execution is permitted: non-root where compatible, no privileged mode, `no-new-privileges`, drop unnecessary capabilities, seccomp/equivalent filtering, configurable CPU/memory/PID limits, only explicit source/workspace/output/user-data mounts, no Docker socket/SSH/cloud/GitHub credentials/whole-home/unrelated host paths or secret environment inheritance, outbound network enabled by default, and loopback-only published inbound services; fail closed if mandatory controls cannot be applied
-- [ ] T037 [US1] Implement authenticated JupyterLab startup with `jupyter-collaboration` explicitly provisioned/enabled/probed, owner-only runtime credential persistence, authoritative shared-document/version/save/rename integration in `src/notebook_launcher/jupyter.py`, kernel readiness probing, and requested working-notebook URL generation in `src/notebook_launcher/runtime.py`
-- [ ] T038 [US1] Implement remote-source launch orchestration from `received` through `ready`, including trust pause/resume, full-sandbox readiness gate, collaboration readiness gate, and failure-phase reporting, in `src/notebook_launcher/orchestration.py`
-- [ ] T039 [US1] Implement `/open`, local trust-confirmation page, `GET /api/launches/{launch_id}`, `POST /api/launches/{launch_id}/trust`, `GET /api/trust`, and `DELETE /api/trust/{trust_id}` in `src/notebook_launcher/app.py`
-- [ ] T040 [US1] Implement `notebook-launcher serve`, `trust list`, and `trust revoke <trust-id>` behavior from `contracts/cli.md` in `src/notebook_launcher/cli.py`
-- [ ] T041 [US1] Ensure fresh mutable work trees are not dependent on a writable GitHub remote and no GitHub write credentials are injected during source/workspace creation in `src/notebook_launcher/workspace.py`
-- [ ] T042 [US1] Run and fix US1 unit/contract/integration tests in `tests/unit/test_source.py`, `tests/unit/test_trust.py`, `tests/contract/test_launch_trust_api.py`, `tests/integration/test_trust_gate.py`, `tests/integration/test_open_notebook.py`, and `tests/integration/test_environment_cache.py`
-- [ ] T043 [US1] Validate the US1 trust/environment/full-sandbox/collaboration flow from `specs/001-local-notebook-launcher/quickstart.md` and record any command corrections in `specs/001-local-notebook-launcher/quickstart.md`
-
-**Checkpoint**: A trusted public GitHub notebook can be opened locally at an immutable source revision, with source-declared dependencies isolated from host state and the complete standard sandbox active before first execution.
+- [ ] T032 [P] [US1] Implement strict GitHub source parsing and validated clone URL construction in `src/notebook_launcher/source.py`
+- [ ] T033 [US1] Implement repository metadata lookup including stable numeric ID/node ID and immutable ref resolution in `src/notebook_launcher/source.py`
+- [ ] T034 [P] [US1] Implement signed request-bound one-time local launch authorization tokens and replay checks in `src/notebook_launcher/launch_auth.py`
+- [ ] T035 [P] [US1] Implement stable-ID trust lookup/create/revoke and grant-time/current-name handling in `src/notebook_launcher/trust.py`
+- [ ] T036 [US1] Implement immutable source acquisition/cache and notebook existence validation in `src/notebook_launcher/repository.py`
+- [ ] T037 [US1] Implement fresh workspace materialization with immutable provenance in `src/notebook_launcher/workspace.py`
+- [ ] T038 [P] [US1] Implement deterministic environment identity/build cache in `src/notebook_launcher/environment.py`
+- [ ] T039 [US1] Implement repo2docker build/cache miss behavior and redacted failures in `src/notebook_launcher/environment.py`
+- [ ] T040 [US1] Implement non-executing GET `/open` preview page and anti-framing headers in `src/notebook_launcher/app.py`
+- [ ] T041 [US1] Implement `POST /api/launches` token consumption, same-origin/local checks, request/source identity revalidation, and transition to trust/acquisition in `src/notebook_launcher/app.py`
+- [ ] T042 [US1] Implement trust confirmation routes/page only after launch authorization in `src/notebook_launcher/app.py`
+- [ ] T043 [US1] Ensure trusted source never bypasses launch authorization in `src/notebook_launcher/orchestration.py`
+- [ ] T044 [US1] Ensure no GitHub write credentials/remote publishing relationship in `src/notebook_launcher/workspace.py`
+- [ ] T045 [US1] Run/fix US1 tests and validate quickstart launch flow in `specs/001-local-notebook-launcher/quickstart.md`
 
 ---
 
-## Phase 4: User Story 2 - Keep a Persistent, Editable Local Copy (Priority: P1)
+## Phase 4 — US5 Standard sandbox + egress boundary (P1, before runtime ready)
 
-**Goal**: Preserve notebook edits, saved outputs, workspace files, and generated artifacts across runtime shutdown/reopen; support active-notebook rename/move and safe disk-full behavior; and support local Save a Copy without GitHub mutation.
+### Tests
 
-**Independent Test**: Edit/run a notebook, rename/move it through the supported path, create an artifact, stop/reopen and verify the new active path plus edit/output/artifact; simulate a replacement write failure and verify the prior saved file is intact; then Save a Copy and verify both notebooks persist while source provenance remains unchanged.
+- [ ] T046 [P] [US5] Test non-root/no-privileged/no-new-privileges/capability/seccomp/resource-limit argv in `tests/unit/test_sandbox_policy.py`
+- [ ] T047 [P] [US5] Test prohibited mounts/secrets/Docker socket/whole-home in `tests/unit/test_sandbox_mounts.py`
+- [ ] T048 [P] [US5] Test denied IPv4/IPv6 destination classification including loopback/private/ULA/link-local/metadata/multicast/non-global and allowed global IPs in `tests/unit/test_network_policy.py`
+- [ ] T049 [P] [US5] Test configured DNS resolver exception without permitting DNS-resolved private targets in `tests/unit/test_network_policy.py`
+- [ ] T050 [P] [US5] Test no host-gateway alias/bypass is added in `tests/unit/test_network_policy.py`
+- [ ] T051 [P] [US5] Integration-test public Internet succeeds while host-gateway/RFC1918/link-local/metadata/private-DNS destinations fail in `tests/integration/test_network_policy.py`
+- [ ] T052 [P] [US5] Test structured argv command-injection rejection in `tests/unit/test_injection.py`
+- [ ] T053 [P] [US5] Test no GitHub mutation surface in `tests/integration/test_no_github_mutation.py`
+- [ ] T054 [P] [US5] Test cross-session/private-state denial in `tests/integration/test_session_isolation.py`
 
-### Tests for User Story 2
+### Implementation
 
-- [ ] T044 [P] [US2] Add workspace create/reopen persistence tests proving a fresh remote launch creates a new workspace, reopen never resets it from GitHub, a supported active-notebook rename/move updates `active_notebook_path` and survives reopen, and an unsupported out-of-band disappearance fails clearly in `tests/integration/test_workspace_persistence.py`
-- [ ] T045 [P] [US2] Add Save-a-Copy tests for `.ipynb` destination validation, traversal rejection, `overwrite=false` preservation, optional output preservation, source snapshot immutability, and safe replacement behavior in `tests/unit/test_workspace_copy.py`
-- [ ] T046 [P] [US2] Add workspace metadata and Save-a-Copy API contract tests in `tests/contract/test_workspace_api.py`
-- [ ] T047 [P] [US2] Add persistence/storage-failure test proving arbitrary non-notebook files and `/outputs` artifacts survive runtime teardown/reopen and simulated `ENOSPC`/replacement failure preserves the prior saved file without advancing metadata in `tests/integration/test_workspace_files.py`
-
-### Implementation for User Story 2
-
-- [ ] T048 [P] [US2] Implement persisted `Workspace` metadata/provenance fields and lookup helpers in `src/notebook_launcher/state.py`, including `root_path`, `work_path`, `outputs_path`, `active_notebook_path`, timestamps, and optional `user_data_grant_id`
-- [ ] T049 [US2] Implement reopen-by-workspace-ID and active-notebook rename/move reconciliation in `src/notebook_launcher/workspace.py` and `src/notebook_launcher/jupyter.py`, reusing the existing mutable `work/` tree without source reset, updating `active_notebook_path` on supported moves, and failing clearly if the recorded active path disappears out-of-band
-- [ ] T050 [US2] Implement workspace/output durability and atomic/safe replacement helpers in `src/notebook_launcher/workspace.py`, mapping disk-full/comparable failures to actionable errors while preserving the prior authoritative file and avoiding partial replacement
-- [ ] T051 [US2] Implement Save a Copy to validated workspace-relative destinations with `.ipynb` requirement, `overwrite=false` default, optional output stripping/preservation, and safe replacement semantics in `src/notebook_launcher/workspace.py`
-- [ ] T052 [US2] Implement low-level runtime stop/recreate hooks that preserve workspace/environment cache for persistence tests in `src/notebook_launcher/runtime.py`
-- [ ] T053 [US2] Implement `GET /api/workspaces/{workspace_id}` and `POST /api/workspaces/{workspace_id}/notebooks/copy` according to `contracts/openapi.yaml` in `src/notebook_launcher/app.py`
-- [ ] T054 [US2] Ensure source snapshots remain read-only/unchanged across browser saves, supported notebook rename/move, Save a Copy, and reopen operations in `src/notebook_launcher/repository.py`
-- [ ] T055 [US2] Run and fix US2 tests in `tests/integration/test_workspace_persistence.py`, `tests/unit/test_workspace_copy.py`, `tests/contract/test_workspace_api.py`, and `tests/integration/test_workspace_files.py`
-- [ ] T056 [US2] Validate persistence, rename/move, disk-full, and Save-a-Copy scenarios in `specs/001-local-notebook-launcher/quickstart.md` against the implemented behavior
-
-**Checkpoint**: Local work behaves like a persistent Colab-style copy, active-notebook path changes are deterministic, failed writes preserve the last good state, and GitHub remains immutable input.
+- [ ] T055 [US5] Implement complete standard sandbox argv/policy and fail-closed assertions in `src/notebook_launcher/sandbox.py`
+- [ ] T056 [US5] Implement mount allowlist and host secret/environment scrubbing in `src/notebook_launcher/sandbox.py` and `src/notebook_launcher/runtime.py`
+- [ ] T057 [US5] Implement public-Internet/non-global-deny destination policy in `src/notebook_launcher/network.py`
+- [ ] T058 [US5] Implement launcher-managed network/firewall application that notebook code cannot remove in `src/notebook_launcher/network.py`
+- [ ] T059 [US5] Implement explicit configured DNS resolver exception and IP-layer post-resolution deny rules in `src/notebook_launcher/network.py`
+- [ ] T060 [US5] Ensure no host-gateway alias and loopback-only inbound publication in `src/notebook_launcher/runtime.py`
+- [ ] T061 [US5] Gate runtime readiness on sandbox+network policy assertions in `src/notebook_launcher/runtime.py`
+- [ ] T062 [US5] Run/fix US5 tests and update `README.md` security/network guarantees
 
 ---
 
-## Phase 5: User Story 3 - Let an Agent Operate the Same Notebook (Priority: P1)
+## Phase 5 — US2 Persistent workspace, active path, safe writes (P1)
 
-**Goal**: Attach an MCP-capable agent to the same authoritative Jupyter document/kernel, support writable repair workflows and strict readonly inspection, reject stale edits, permit full-workspace writable file operations without active-notebook bypass, serialize writable agents with one lease, cancel runaway executions, and bound large/multimodal control-channel output.
+### Tests
 
-**Independent Test**: Attach a writable agent, read/edit/execute/fail/repair the active notebook, modify representative workspace files, reject a deliberately stale edit/save, reject a second writable agent, cancel a non-terminating cell, verify bounded large/multimodal output, and verify the browser sees the same document/kernel; then attach readonly and prove all execution/mutation attempts fail.
+- [ ] T063 [P] [US2] Test workspace persistence/reopen and no Git reset in `tests/integration/test_workspace_persistence.py`
+- [ ] T064 [P] [US2] Test active-notebook rename/move and missing-path behavior in `tests/integration/test_workspace_persistence.py`
+- [ ] T065 [P] [US2] Test Save a Copy validation/overwrite/output/source immutability in `tests/unit/test_workspace_copy.py`
+- [ ] T066 [P] [US2] Test `ENOSPC`/replacement failure preserves prior file and metadata in `tests/integration/test_workspace_files.py`
+- [ ] T067 [P] [US2] Contract-test workspace metadata/copy API in `tests/contract/test_workspace_api.py`
 
-### Tests for User Story 3
+### Implementation
 
-- [ ] T057 [P] [US3] Add semantic MCP contract tests for writable/readonly capabilities including `notebook.move`, `execution.cancel`, active-notebook generic-file rejection, 1 MiB default bounded-output semantics, and secret-free attachment descriptors in `tests/contract/test_mcp_contract.py`
-- [ ] T058 [P] [US3] Add writable-lease tests for atomic acquisition, second-writer `writable_agent_busy`, release on disconnect, invalidation on session stop, stale-lease reconciliation, and no promise of concurrent multi-readonly admission in `tests/unit/test_leases.py`
-- [ ] T059 [P] [US3] Add optimistic notebook/file version tests proving existing-object mutations require expected versions, normal browser edits advance the authoritative shared document version, deliberately stale independent active-notebook saves are rejected, and stale mutations return `conflict` without changing authoritative state in `tests/unit/test_versions.py`
-- [ ] T060 [P] [US3] Add same-kernel writable MCP integration test for notebook read/insert/update/delete/move, cell execution, ordered execute-all, diagnostic code, output retrieval, deliberate failure/repair, kernel restart, real cancellation/timeout of a non-terminating cell, and bounded oversized-text/binary/multimodal output in `tests/integration/test_mcp_writable.py`
-- [ ] T061 [P] [US3] Add readonly integration test proving notebook/cell/output inspection works while execution, execution cancellation, kernel restart, notebook mutation/move, workspace-file mutation, and write escalation are denied in `tests/integration/test_mcp_readonly.py`
-- [ ] T062 [P] [US3] Add browser↔agent concurrent-edit test proving normal browser edits persist in the shared document, stale agent and stale independent save attempts are rejected/refreshable, and no last-write-wins silent loss occurs in `tests/integration/test_mcp_conflicts.py`
-- [ ] T063 [P] [US3] Add persistent workspace-file MCP tests for read/list/create/write/move/delete with `file_version` preconditions, active-notebook generic-file write/move/delete rejection, and notebook-aware move updating `active_notebook_path` in `tests/integration/test_mcp_workspace_files.py`
-- [ ] T064 [P] [US3] Add cross-session private-state isolation, Jupyter-token redaction, and full-output/audit-payload exclusion tests in `tests/integration/test_mcp_isolation.py`
-
-### Implementation for User Story 3
-
-- [ ] T065 [P] [US3] Define the implementation-neutral MCP policy adapter and semantic capability registry including notebook-aware move, execution operation IDs/cancel, version preconditions, active-notebook file guard, and bounded output envelopes in `src/notebook_launcher/mcp.py`
-- [ ] T066 [US3] Implement the initial Datalayer `jupyter-mcp-server` 2.x adapter against the existing launcher-created Jupyter server in `src/notebook_launcher/mcp.py`, without exposing backend-specific tool names as launcher contract and supplementing backend behavior where the semantic contract requires it
-- [ ] T067 [US3] Implement `notebook-launcher mcp <session-id> [--mode write|readonly] [--client-label]` stdio bridge with internal Jupyter credential resolution in `src/notebook_launcher/cli.py`
-- [ ] T068 [US3] Enforce writable-lease acquisition before exposing writable MCP operations and explicit `writable_agent_busy` failure for a second writer in `src/notebook_launcher/mcp.py`
-- [ ] T069 [US3] Integrate lease heartbeat/disconnect/crash/session-stop reconciliation with `WritableAgentLease` state in `src/notebook_launcher/leases.py`
-- [ ] T070 [US3] Implement `notebook.read`, `cell.read`, `cell.insert`, `cell.update`, `cell.delete`, and notebook-aware `notebook.move` with opaque `document_version`/`expected_document_version` conflict preconditions and active-path metadata updates in `src/notebook_launcher/mcp.py`
-- [ ] T071 [US3] Implement `cell.execute`, `notebook.execute_all`, `kernel.execute_code`, bounded `output.read`, `kernel.restart`, execution operation IDs, and `execution.cancel` against the active Jupyter kernel in `src/notebook_launcher/mcp.py`
-- [ ] T072 [US3] Implement execute-all ordering, default stop-on-error, cell-scoped failure results, configurable deadlines, actual kernel interrupt on timeout/cancel, bounded grace/restart recovery for unresponsive kernels, 1 MiB default output bounding/truncation/type metadata, and explicit exception/timeout/cancel/kernel-death/transport outcome distinctions in `src/notebook_launcher/mcp.py`
-- [ ] T073 [US3] Implement full-workspace `workspace.file.read/list/write/move/delete` semantics with path containment and opaque `file_version` preconditions in `src/notebook_launcher/mcp.py`, rejecting active-notebook write/move/delete so generic file tools cannot bypass notebook-aware semantics
-- [ ] T074 [US3] Enforce readonly inspection-only policy at the launcher/MCP boundary, including rejection of all code execution, execution cancellation, kernel restart, notebook mutation/move, workspace-file mutation, and read-only-to-write escalation in `src/notebook_launcher/mcp.py`
-- [ ] T075 [US3] Implement authoritative Jupyter collaboration/save-version/rename-event integration in `src/notebook_launcher/jupyter.py` and bind browser and MCP to that same document, workspace, kernel lifecycle, sandbox, GPU policy, and resource limits in `src/notebook_launcher/runtime.py`
-- [ ] T076 [US3] Implement non-secret `GET /api/sessions/{session_id}/mcp` descriptor including `write_lease_available` without acquiring the lease in `src/notebook_launcher/app.py`
-- [ ] T077 [US3] Emit sanitized attachment/execution/conflict/lease/cancellation audit events without full cell source/output or large/binary/multimodal payloads in `src/notebook_launcher/audit.py`
-- [ ] T078 [US3] Run the Datalayer/Jupyter-collaboration conformance suite and pin the exact passing backend/collaboration versions in `pyproject.toml`; reject candidate versions that lose bidirectional edits, allow stale overwrite, fail real cancellation, bypass the active-notebook guard, or violate bounded-output behavior in `tests/integration/test_mcp_conflicts.py` and `tests/integration/test_mcp_writable.py`
-- [ ] T079 [US3] Run and fix all US3 contract/integration tests in `tests/contract/test_mcp_contract.py`, `tests/unit/test_leases.py`, `tests/unit/test_versions.py`, `tests/integration/test_mcp_writable.py`, `tests/integration/test_mcp_readonly.py`, `tests/integration/test_mcp_conflicts.py`, `tests/integration/test_mcp_workspace_files.py`, and `tests/integration/test_mcp_isolation.py`
-
-**Checkpoint**: One writable agent can safely operate and repair the same notebook/kernel the user sees; stale writes cannot silently overwrite shared state, runaway execution is actually cancellable/bounded, active-notebook file bypass is blocked, and readonly remains inspection-only.
+- [ ] T068 [US2] Implement persisted workspace/provenance/active-notebook metadata in `src/notebook_launcher/state.py`
+- [ ] T069 [US2] Implement reopen existing mutable work without source reset in `src/notebook_launcher/workspace.py`
+- [ ] T070 [US2] Implement atomic/safe replacement and storage errors in `src/notebook_launcher/workspace.py`
+- [ ] T071 [US2] Implement Save a Copy workspace destinations in `src/notebook_launcher/workspace.py`
+- [ ] T072 [US2] Implement active-notebook rename/move reconciliation in `src/notebook_launcher/jupyter.py` and `src/notebook_launcher/workspace.py`
+- [ ] T073 [US2] Implement workspace metadata/copy endpoints in `src/notebook_launcher/app.py`
+- [ ] T074 [US2] Verify source snapshot remains unchanged in `src/notebook_launcher/repository.py`
+- [ ] T075 [US2] Run/fix US2 tests and quickstart persistence/storage cases
 
 ---
 
-## Phase 6: User Story 4 - Use Local GPU Compute When Available (Priority: P1)
+## Phase 6 — US3 Same-runtime MCP + execution ownership (P1)
 
-**Goal**: Support `gpu=auto|on|off` with explicit failure/fallback semantics and identical GPU visibility for browser and MCP execution.
+### Tests
 
-**Independent Test**: On a configured WSL2/Linux NVIDIA host, launch each GPU mode and verify `on` requires GPU, `off` exposes none, `auto` uses GPU when available and CPU otherwise, and browser/MCP device probes agree.
+- [ ] T076 [P] [US3] Contract-test write/readonly capabilities, fixed notebook target, cancel semantics, bounded output in `tests/contract/test_mcp_contract.py`
+- [ ] T077 [P] [US3] Test writable lease acquisition/release/stale reconciliation in `tests/unit/test_leases.py`
+- [ ] T078 [P] [US3] Test document/file versions and active-notebook file guards in `tests/unit/test_versions.py`
+- [ ] T079 [P] [US3] Test execution broker queue/state/message ownership transitions in `tests/unit/test_execution_broker.py`
+- [ ] T080 [P] [US3] Integration-test writable notebook edit/execute/fail/repair/restart/output in `tests/integration/test_mcp_writable.py`
+- [ ] T081 [P] [US3] Integration-test running-agent non-terminating cancellation/timeout in `tests/integration/test_mcp_cancellation.py`
+- [ ] T082 [P] [US3] Integration-test browser-running + queued-agent cancel/timeout leaves browser execution uninterrupted in `tests/integration/test_mcp_cancellation_ownership.py`
+- [ ] T083 [P] [US3] Integration-test dispatched idle→busy race: cancel_pending does not interrupt non-agent parent request in `tests/integration/test_mcp_cancellation_ownership.py`
+- [ ] T084 [P] [US3] Integration-test readonly denials in `tests/integration/test_mcp_readonly.py`
+- [ ] T085 [P] [US3] Integration-test browser↔agent conflict/persistence in `tests/integration/test_mcp_conflicts.py`
+- [ ] T086 [P] [US3] Integration-test ordinary workspace files and active-notebook generic-file rejection in `tests/integration/test_mcp_workspace_files.py`
+- [ ] T087 [P] [US3] Integration-test browser opens/focuses notebook B but MCP remains bound to active notebook A in `tests/integration/test_mcp_fixed_target.py`
+- [ ] T088 [P] [US3] Test bounded large/binary/multimodal output and audit exclusion in `tests/integration/test_mcp_output_bounds.py`
+- [ ] T089 [P] [US3] Test cross-session private-state/token isolation in `tests/integration/test_mcp_isolation.py`
 
-### Tests for User Story 4
+### Implementation
 
-- [ ] T080 [P] [US4] Add unit tests for GPU capability detection and `auto|on|off` decision semantics in `tests/unit/test_gpu_policy.py`
-- [ ] T081 [P] [US4] Add sandbox-command tests proving GPU device flags are absent for `off`, required for `on`, and conditional for `auto` without weakening the already-required standard sandbox controls in `tests/unit/test_sandbox_gpu.py`
-- [ ] T082 [P] [US4] Add browser/MCP same-device integration test guarded by GPU availability in `tests/integration/test_gpu_consistency.py`
-
-### Implementation for User Story 4
-
-- [ ] T083 [P] [US4] Implement NVIDIA host/container capability probe without attempting driver/toolkit installation in `src/notebook_launcher/runtime.py`
-- [ ] T084 [US4] Implement effective `gpu=auto|on|off` allocation and clear required-GPU failure before readiness in `src/notebook_launcher/runtime.py`
-- [ ] T085 [US4] Add GPU device exposure to standard-sandbox runtime argv only when effective policy enables it in `src/notebook_launcher/sandbox.py`
-- [ ] T086 [US4] Expose effective `gpu_enabled` consistently in launch/session status and MCP-visible runtime state in `src/notebook_launcher/models.py`
-- [ ] T087 [US4] Run and fix GPU unit/integration tests in `tests/unit/test_gpu_policy.py`, `tests/unit/test_sandbox_gpu.py`, and `tests/integration/test_gpu_consistency.py`
-- [ ] T088 [US4] Execute and document the WSL2/Linux NVIDIA smoke procedure and expected browser/MCP output in `specs/001-local-notebook-launcher/quickstart.md`
-
-**Checkpoint**: GPU use is explicit, observable, and identical across interactive and agent execution.
-
----
-
-## Phase 7: User Story 5 - Keep Local Execution Contained (Priority: P1)
-
-**Goal**: Verify and regression-harden the complete standard sandbox that is already mandatory before US1 execution, prevent unrelated host/credential access, keep inbound services loopback-only, and expose no GitHub mutation capability.
-
-**Independent Test**: Launch a trusted notebook and verify only allowed mounts/resources are visible; command-injection/traversal/cross-session/prohibited-mount attempts fail; no Docker socket/host credentials/GitHub write surface exists; outbound package/model access works by default; the runtime refuses readiness if mandatory sandbox controls are absent.
-
-### Tests for User Story 5
-
-- [ ] T089 [P] [US5] Add sandbox assertions for non-root where supported, no privileged mode, `no-new-privileges`, dropped unnecessary capabilities, seccomp/equivalent filtering, CPU/memory/PID limits, scrubbed host-secret environment, and fail-closed readiness in `tests/unit/test_sandbox_policy.py`
-- [ ] T090 [P] [US5] Add prohibited-mount tests for Docker socket, SSH keys, cloud/GitHub credentials, whole-home mounts, and unrelated host paths in `tests/unit/test_sandbox_mounts.py`
-- [ ] T091 [P] [US5] Add command-injection tests across source/ref/path/session/copy/permission fields proving structured argv treatment in `tests/unit/test_injection.py`
-- [ ] T092 [P] [US5] Add integration test proving Jupyter/launcher bind only to loopback, no extra inbound MCP listener exists under stdio, and outbound package/model/data/API access works by default in `tests/integration/test_network_policy.py`
-- [ ] T093 [P] [US5] Add no-GitHub-mutation surface test proving launcher/MCP expose no commit, push, branch-create, or credential-backed remote-write path in `tests/integration/test_no_github_mutation.py`
-- [ ] T094 [P] [US5] Add cross-session attachment/private-state access denial tests in `tests/integration/test_session_isolation.py`
-
-### Implementation for User Story 5
-
-- [ ] T095 [US5] Add reusable standard-sandbox policy introspection/assertion in `src/notebook_launcher/sandbox.py` so runtime readiness fails closed if any constitution-mandated control established in T036 is missing or relaxed
-- [ ] T096 [US5] Implement explicit mount allowlist and forbidden-path validation preventing Docker socket, credential directories, whole-home, and unrelated host mounts in `src/notebook_launcher/sandbox.py`, preserving the minimal-mount policy already applied in US1
-- [ ] T097 [US5] Regression-harden loopback-only launcher/Jupyter publication and default outbound-enabled/no-general-inbound sandbox network policy in `src/notebook_launcher/runtime.py`
-- [ ] T098 [US5] Verify and enforce that all Git, repo2docker, Docker, and Jupyter subprocess calls use structured argv without user-controlled shell interpolation in `src/notebook_launcher/source.py`, `src/notebook_launcher/repository.py`, `src/notebook_launcher/environment.py`, and `src/notebook_launcher/runtime.py`
-- [ ] T099 [US5] Regression-harden runtime/MCP environment scrubbing so host SSH/GitHub/cloud credentials, Docker socket, unrelated host environment secrets, and unrelated host paths are not inherited in `src/notebook_launcher/runtime.py`
-- [ ] T100 [US5] Ensure no launcher or MCP route/capability implements commit/push/branch/GitHub mutation and no GitHub write credential is requested in `src/notebook_launcher/app.py`, `src/notebook_launcher/cli.py`, and `src/notebook_launcher/mcp.py`
-- [ ] T101 [US5] Run and fix US5 security tests in `tests/unit/test_sandbox_policy.py`, `tests/unit/test_sandbox_mounts.py`, `tests/unit/test_injection.py`, `tests/integration/test_network_policy.py`, `tests/integration/test_no_github_mutation.py`, and `tests/integration/test_session_isolation.py`
-- [ ] T102 [US5] Update sandbox guarantees/limitations and trusted-repository warning to match tested behavior in `README.md`
-
-**Checkpoint**: The runtime has a tested, complete local trust boundary from first execution without claiming containment of arbitrary hostile code.
+- [ ] T090 [P] [US3] Define backend-neutral semantic MCP adapter in `src/notebook_launcher/mcp.py`
+- [ ] T091 [US3] Implement initial Datalayer adapter against existing launcher Jupyter in `src/notebook_launcher/mcp.py`
+- [ ] T092 [US3] Implement stdio bridge and private credential resolution in `src/notebook_launcher/cli.py`
+- [ ] T093 [US3] Enforce writable lease before writable capabilities in `src/notebook_launcher/mcp.py`
+- [ ] T094 [US3] Implement authoritative Jupyter collaboration/version/fixed-target observations in `src/notebook_launcher/jupyter.py`
+- [ ] T095 [US3] Implement notebook/cell operations and notebook-aware move in `src/notebook_launcher/mcp.py`
+- [ ] T096 [US3] Implement session execution broker queue, Jupyter message IDs, kernel busy-parent observation, and serialized dispatch in `src/notebook_launcher/execution.py`
+- [ ] T097 [US3] Implement ownership-safe timeout/cancel and bounded grace/restart recovery in `src/notebook_launcher/execution.py`
+- [ ] T098 [US3] Implement cell/whole-notebook/diagnostic execution through broker in `src/notebook_launcher/mcp.py`
+- [ ] T099 [US3] Implement bounded output envelopes in `src/notebook_launcher/mcp.py`
+- [ ] T100 [US3] Implement ordinary workspace file operations with active-notebook guard in `src/notebook_launcher/mcp.py`
+- [ ] T101 [US3] Enforce readonly policy at launcher/MCP boundary in `src/notebook_launcher/mcp.py`
+- [ ] T102 [US3] Implement non-secret MCP descriptor including fixed notebook target in `src/notebook_launcher/app.py`
+- [ ] T103 [US3] Emit bounded attachment/execution/conflict/cancellation audit events in `src/notebook_launcher/audit.py`
+- [ ] T104 [US3] Run backend/Jupyter conformance and pin exact passing versions in `pyproject.toml`
+- [ ] T105 [US3] Run/fix all US3 tests
 
 ---
 
-## Phase 8: User Story 6 - Attach Explicit Local Data Storage (Priority: P2)
+## Phase 7 — US4 GPU policy (P1 where GPU available)
 
-**Goal**: Let the local user explicitly grant one host directory to a workspace as `ro` or `rw`, with no default mount and no way for a remote GitHub launch to choose the host path.
-
-**Independent Test**: Grant a temporary local directory read-only and read-write, verify it appears at `/mnt/user-data` with the requested mode, verify unrelated host paths remain inaccessible, revoke it, and verify a GitHub URL cannot create/change the grant.
-
-### Tests for User Story 6
-
-- [ ] T103 [P] [US6] Add `UserDataGrant` state tests for one selected host directory, stable `/mnt/user-data`, `mode ∈ {ro,rw}`, revocation, and missing-path behavior in `tests/unit/test_user_data_grant.py`
-- [ ] T104 [P] [US6] Add CLI contract tests for `workspace mount <workspace-id> <host-path> --mode ro|rw` and `workspace unmount <workspace-id>` including whole-home rejection and active-workspace handling in `tests/contract/test_workspace_mount_cli.py`
-- [ ] T105 [P] [US6] Add Docker-backed mount isolation test for no default mount, read-only enforcement, read-write persistence, and unrelated host-path denial in `tests/integration/test_user_data_mount.py`
-
-### Implementation for User Story 6
-
-- [ ] T106 [US6] Implement local `UserDataGrant` persistence/revocation in `src/notebook_launcher/state.py`, with `host_path` accepted only from local management flow, stable container path `/mnt/user-data`, and mode exactly `ro|rw`
-- [ ] T107 [US6] Implement `workspace mount` and `workspace unmount` CLI commands with existing-directory validation, forbidden/whole-home checks, and explicit restart requirement for active sessions in `src/notebook_launcher/cli.py`
-- [ ] T108 [US6] Apply the active user-data grant as one explicit `ro`/`rw` sandbox mount and report missing host directories without substituting other paths in `src/notebook_launcher/sandbox.py`
-- [ ] T109 [US6] Extend Save a Copy to `destination_scope=user_data` only when an active writable user-data grant exists and destination remains beneath that grant in `src/notebook_launcher/workspace.py`
-- [ ] T110 [US6] Run and fix US6 tests in `tests/unit/test_user_data_grant.py`, `tests/contract/test_workspace_mount_cli.py`, and `tests/integration/test_user_data_mount.py`
-- [ ] T111 [US6] Update local-storage mount and Save-a-Copy examples in `specs/001-local-notebook-launcher/quickstart.md`
-
-**Checkpoint**: Explicit local data behaves like an opt-in external drive mount without widening the default host boundary.
+- [ ] T106 [P] [US4] Test GPU detection and `auto|on|off` policy in `tests/unit/test_gpu_policy.py`
+- [ ] T107 [P] [US4] Test GPU sandbox flags without weakening sandbox/network policy in `tests/unit/test_sandbox_gpu.py`
+- [ ] T108 [P] [US4] Test browser/MCP same-device identity on configured GPU host in `tests/integration/test_gpu_consistency.py`
+- [ ] T109 [US4] Implement NVIDIA host/container capability probe in `src/notebook_launcher/runtime.py`
+- [ ] T110 [US4] Implement effective GPU allocation/failure semantics in `src/notebook_launcher/runtime.py`
+- [ ] T111 [US4] Add GPU device exposure only when enabled in `src/notebook_launcher/sandbox.py`
+- [ ] T112 [US4] Expose effective GPU status in `src/notebook_launcher/models.py`
+- [ ] T113 [US4] Run/fix GPU tests and document smoke procedure in `specs/001-local-notebook-launcher/quickstart.md`
 
 ---
 
-## Phase 9: User Story 7 - Stop and Reopen Work Predictably (Priority: P2)
+## Phase 8 — US6 Canonical local data grant (P2)
 
-**Goal**: Expose clear launch/session status, stop disposable execution resources without deleting work, reopen existing work, reconcile stale runtime ownership, and enforce one active notebook session per workspace.
+### Tests
 
-**Independent Test**: Start a workspace, observe phases, issue a second start and confirm no second runtime is created, stop the session, verify MCP credentials/leases/execution handles are invalidated while files/cache persist, restart the launcher if needed, and reopen the same workspace successfully at the current active notebook path.
+- [ ] T114 [P] [US6] Test canonical-root grant persistence/revocation/missing-root behavior in `tests/unit/test_user_data_grant.py`
+- [ ] T115 [P] [US6] Contract-test mount/unmount CLI including canonical whole-home rejection in `tests/contract/test_workspace_mount_cli.py`
+- [ ] T116 [P] [US6] Test traversal/symlink/junction/reparse/path-swap escapes for host-side operations in `tests/unit/test_safe_host_paths.py`
+- [ ] T117 [P] [US6] Docker-backed test no-default/ro/rw mount and unrelated host denial in `tests/integration/test_user_data_mount.py`
+- [ ] T118 [P] [US6] Test Save a Copy to user-data cannot escape via symlink/race and respects `ro` in `tests/integration/test_user_data_copy.py`
 
-### Tests for User Story 7
+### Implementation
 
-- [ ] T112 [P] [US7] Add launch/session status and stop endpoint contract tests including `existing_session_id`, `404`, `409`, and `410` behavior in `tests/contract/test_lifecycle_api.py`
-- [ ] T113 [P] [US7] Add concurrent start test proving repeated requests cannot create more than one active notebook session for one workspace in `tests/integration/test_single_active_session.py`
-- [ ] T114 [P] [US7] Add launcher-restart reconciliation test that clears stale recorded ownership only after the runtime is confirmed dead and preserves live ownership otherwise in `tests/integration/test_session_reconciliation.py`
-- [ ] T115 [P] [US7] Add stop/reopen test proving runtime credentials, writable lease, and execution-control handles are invalidated while workspace files, current `active_notebook_path`, and reusable environment cache remain in `tests/integration/test_stop_reopen.py`
-
-### Implementation for User Story 7
-
-- [ ] T116 [US7] Enforce transactional one-active-session-per-workspace acquisition before runtime creation and return/reuse the existing active session when appropriate in `src/notebook_launcher/state.py`
-- [ ] T117 [US7] Implement launcher-start reconciliation between SQLite session ownership and actual runtime/container liveness in `src/notebook_launcher/orchestration.py`
-- [ ] T118 [US7] Implement idempotent session stop that terminates runtime, invalidates Jupyter/MCP private state, writable lease, and execution-control handles, records terminal lifecycle, and preserves workspace/cache in `src/notebook_launcher/runtime.py`
-- [ ] T119 [US7] Implement reopen orchestration that starts a replacement runtime only when no live session owns the workspace and verifies the recorded active notebook path exists before readiness in `src/notebook_launcher/orchestration.py`
-- [ ] T120 [US7] Implement launch/status/existing-session local pages plus `DELETE /api/sessions/{session_id}` and `/health` in `src/notebook_launcher/app.py`
-- [ ] T121 [US7] Include `active_session_id` in workspace metadata and `existing_session_id` in launch status without exposing private runtime credentials in `src/notebook_launcher/models.py`
-- [ ] T122 [US7] Add clear CLI/status output for `workspace_active`, stopped/invalidated session, missing active notebook, and reopen behavior in `src/notebook_launcher/cli.py`
-- [ ] T123 [US7] Run and fix US7 tests in `tests/contract/test_lifecycle_api.py`, `tests/integration/test_single_active_session.py`, `tests/integration/test_session_reconciliation.py`, and `tests/integration/test_stop_reopen.py`
-- [ ] T124 [US7] Validate stop/reopen/status workflow from `specs/001-local-notebook-launcher/quickstart.md` and update expected responses where required
-
-**Checkpoint**: Runtime lifecycle is predictable, crash-recoverable, and cannot create competing runtimes for one mutable workspace.
+- [ ] T119 [US6] Implement canonical grant root state/revalidation in `src/notebook_launcher/state.py` and `src/notebook_launcher/workspace.py`
+- [ ] T120 [US6] Implement component-safe dirfd/no-follow host path resolver (openat2-style where available) in `src/notebook_launcher/safe_paths.py`
+- [ ] T121 [US6] Implement mount/unmount CLI using canonical root validation in `src/notebook_launcher/cli.py`
+- [ ] T122 [US6] Apply canonical grant as one `ro|rw` mount in `src/notebook_launcher/sandbox.py`
+- [ ] T123 [US6] Implement user-data Save a Copy through safe host path resolver in `src/notebook_launcher/workspace.py`
+- [ ] T124 [US6] Run/fix US6 tests and quickstart symlink-escape cases
 
 ---
 
-## Phase 10: Polish & Cross-Cutting Acceptance
+## Phase 9 — US7 Lifecycle/reopen (P2)
 
-**Purpose**: Prove the complete POC, finalize documentation, and close cross-story quality/security gates.
-
-- [ ] T125 [P] Add end-to-end fixture repository/notebook definitions including a source-declared dependency absent from host, controlled failure cell, non-terminating cell, large text output, binary/multimodal output, and storage-failure fixture notes in `tests/fixtures/e2e/README.md`
-- [ ] T126 Add full GitHub → trust → dependency-isolated environment → complete standard sandbox → Jupyter collaboration → writable MCP edit/execute/file-op/conflict/failure/cancel/repair/notebook-move → stop → reopen acceptance test in `tests/integration/test_e2e_local_notebook_launcher.py`
-- [ ] T127 [P] Add end-to-end readonly acceptance path to `tests/integration/test_e2e_readonly.py`
-- [ ] T128 [P] Add regression test proving source snapshot, GitHub remote, and trust records do not change during browser/MCP workspace mutations and generic file operations cannot bypass the active notebook in `tests/integration/test_e2e_no_remote_mutation.py`
-- [ ] T129 Run the complete automated suite, including disk-full safe-write and bounded-output/cancellation regressions, verify status/health requests complete independently while a long build/execution is in progress, and record platform/backend versions needed for reproducibility in `README.md`
-- [ ] T130 Run the configured WSL2/Linux NVIDIA acceptance path when available and record the tested GPU/runtime matrix in `README.md`
-- [ ] T131 Reconcile public API behavior with `specs/001-local-notebook-launcher/contracts/openapi.yaml` and update only contract mismatches discovered by passing tests in `specs/001-local-notebook-launcher/contracts/openapi.yaml`
-- [ ] T132 Reconcile CLI/MCP/workspace behavior with `specs/001-local-notebook-launcher/contracts/cli.md`, `specs/001-local-notebook-launcher/contracts/mcp-capabilities.md`, and `specs/001-local-notebook-launcher/contracts/workspace-lifecycle.md` after conformance testing
-- [ ] T133 Complete user-facing install, launch, trust, dependency isolation, persistence, Save-a-Copy, active-notebook move, storage-error, GPU, MCP cancellation/output bounds, mount, lifecycle, and security documentation in `README.md`
-- [ ] T134 Perform final constitution/spec/plan/data-model/contracts/tasks consistency review and record any non-product tooling follow-ups separately without expanding feature scope in `specs/001-local-notebook-launcher/tasks.md`
+- [ ] T125 [P] [US7] Contract-test status/stop/existing-session behavior in `tests/contract/test_lifecycle_api.py`
+- [ ] T126 [P] [US7] Test repeated start cannot create second active runtime in `tests/integration/test_single_active_session.py`
+- [ ] T127 [P] [US7] Test launcher restart stale-session reconciliation in `tests/integration/test_session_reconciliation.py`
+- [ ] T128 [P] [US7] Test stop/reopen requires fresh launch authorization and preserves workspace/cache/current active path in `tests/integration/test_stop_reopen.py`
+- [ ] T129 [US7] Enforce transactional single active session in `src/notebook_launcher/state.py`
+- [ ] T130 [US7] Implement runtime liveness reconciliation in `src/notebook_launcher/orchestration.py`
+- [ ] T131 [US7] Implement idempotent stop/invalidation/preservation in `src/notebook_launcher/runtime.py`
+- [ ] T132 [US7] Implement authorized reopen orchestration and active-path validation in `src/notebook_launcher/orchestration.py`
+- [ ] T133 [US7] Implement status/stop/health pages/routes in `src/notebook_launcher/app.py`
+- [ ] T134 [US7] Run/fix lifecycle tests and quickstart reopen flow
 
 ---
 
-## Dependencies & Execution Order
+## Phase 10 — Cross-cutting acceptance/polish
 
-### Phase Dependencies
+- [ ] T135 [P] Define E2E fixture repo with dependency, controlled failure, non-terminating cell, large/binary output in `tests/fixtures/e2e/README.md`
+- [ ] T136 Add full preview → local authorize → trust → sandbox/network → Jupyter → MCP → cancel/repair → stop → authorized reopen E2E test in `tests/integration/test_e2e_local_notebook_launcher.py`
+- [ ] T137 [P] Add E2E GET-only drive-by regression for already-trusted source in `tests/integration/test_e2e_launch_driveby.py`
+- [ ] T138 [P] Add E2E stable-repo-ID trust rename/transfer/recreation regression in `tests/integration/test_e2e_trust_identity.py`
+- [ ] T139 [P] Add E2E readonly path in `tests/integration/test_e2e_readonly.py`
+- [ ] T140 [P] Add E2E no-GitHub-write/source-immutability regression in `tests/integration/test_e2e_no_remote_mutation.py`
+- [ ] T141 Run complete automated suite and verify health/status responsiveness during long build/execution; record tested versions in `README.md`
+- [ ] T142 Run configured WSL2/Linux GPU acceptance when available and record matrix in `README.md`
+- [ ] T143 Reconcile OpenAPI/CLI/MCP/workspace contracts after passing conformance tests in `specs/001-local-notebook-launcher/contracts/`
+- [ ] T144 Complete user-facing documentation for launch authorization vs trust, network policy, canonical data grants, execution ownership, persistence, GPU, MCP, lifecycle in `README.md`
+- [ ] T145 Perform final constitution/spec/plan/data-model/contracts/tasks consistency review in `specs/001-local-notebook-launcher/tasks.md`
 
-- **Phase 1 — Setup**: No dependencies.
-- **Phase 2 — Foundational**: Depends on Phase 1 and blocks every user story.
-- **Phase 3 — US1**: Depends on Phase 2 and establishes the first source-to-Jupyter vertical slice with the complete standard sandbox and collaboration already active before notebook execution.
-- **Phase 4 — US2**: Depends on US1 workspace/runtime creation behavior.
-- **Phase 5 — US3**: Depends on US1 ready Jupyter collaboration sessions and foundational version/lease/state primitives; it can proceed in parallel with later US2 work that does not change runtime/Jupyter/MCP files.
-- **Phase 6 — US4**: Depends on US1 runtime and US3 for the browser/MCP consistency acceptance check.
-- **Phase 7 — US5**: Depends on US1's already-complete standard sandbox; this phase adds exhaustive negative verification and regression hardening, not the first implementation of mandatory sandbox controls.
-- **Phase 8 — US6**: Depends on US2 workspace persistence and US5 mount-boundary enforcement.
-- **Phase 9 — US7**: Depends on US1 runtime and foundational active-session state; it integrates with US3 lease/execution invalidation and US2 persistence.
-- **Phase 10 — Polish**: Depends on all stories included in the release cut.
+## Dependency notes
 
-### User Story Dependency Graph
-
-```text
-Foundation
-   |
-   v
- US1 Open trusted notebook + full sandbox/collaboration
-   |\
-   | +---------> US3 MCP agent ---------> US4 GPU consistency
-   |                 |
-   |                 +--------------------------+
-   v                                            |
- US2 Persistence ----------------> US6 Data mount|
-   |                                ^           |
-   |                                |           |
-   +-----------------------------> US7 Lifecycle|
-   |                                            |
-   +-----------------> US5 Security verification+
-```
-
-US1 is the first vertical slice and is already sandbox-complete. US2, US3, and US5 can be developed after US1 with limited parallelism across distinct modules/tests. US4 requires the MCP path for its full acceptance criterion. US6 intentionally waits for persistence + sandbox mount controls. US7 can begin after US1 but final acceptance includes US2 persistence and US3 lease/execution invalidation.
-
-### Within Each User Story
-
-- Write story tests first and verify they fail for the intended reason.
-- Implement models/state constraints before services that consume them.
-- Implement services/runtime behavior before HTTP/CLI integration points.
-- Run story-specific tests before the checkpoint.
-- Do not launch notebook/agent code before the complete standard sandbox readiness gate passes.
-- Do not weaken a contract to make a backend pass; adapt or reject the backend instead.
-
----
-
-## Parallel Opportunities
-
-- Phase 1 tasks T003–T007 can run in parallel after T001/T002 where they do not edit the same file.
-- Phase 2 test tasks T008–T011 and implementation tasks T012, T013, T015–T018, T020 can be split across different files, with T014/T019 serialized around `state.py`.
-- US1 tests T022–T027 can be authored in parallel; source/trust/environment/sandbox/Jupyter implementation can be split by module before orchestration integration.
-- US2 persistence tests T044–T047 can be authored in parallel.
-- US3 tests T057–T064 can be authored in parallel; lease/version/Jupyter/MCP integration then converges.
-- US4 tests T080–T082 can run in parallel before GPU implementation.
-- US5 negative/security tests T089–T094 can be authored in parallel.
-- US6 tests T103–T105 can be authored in parallel.
-- US7 tests T112–T115 can be authored in parallel.
-- Phase 10 regression/documentation work marked `[P]` can proceed alongside the main end-to-end acceptance test.
-
----
-
-## Parallel Example: User Story 3
-
-```text
-Task T058: tests/unit/test_leases.py
-Task T059: tests/unit/test_versions.py
-Task T060: tests/integration/test_mcp_writable.py
-Task T061: tests/integration/test_mcp_readonly.py
-Task T062: tests/integration/test_mcp_conflicts.py
-Task T063: tests/integration/test_mcp_workspace_files.py
-Task T064: tests/integration/test_mcp_isolation.py
-```
-
-These can be authored concurrently because they target separate test files. Implementation then proceeds through lease/version/Jupyter primitives before converging on `src/notebook_launcher/mcp.py`.
-
----
-
-## Implementation Strategy
-
-### MVP First
-
-The practical MVP is not US1 alone because the constitution explicitly requires the complete local agent-operable path. Deliver in this order:
-
-1. Phase 1 — Setup
-2. Phase 2 — Foundational
-3. Phase 3 — US1 trusted GitHub notebook open with dependency isolation, complete standard sandbox, and Jupyter collaboration
-4. Phase 4 — US2 persistence/reopen/Save a Copy/rename/storage-failure safety
-5. Phase 5 — US3 writable + readonly MCP, conflicts, workspace files, cancellation/output bounds, writable lease
-6. Phase 7 — US5 exhaustive sandbox/security negative verification
-7. Phase 9 — US7 lifecycle/one-active-session behavior
-8. Phase 10 core end-to-end acceptance
-
-US4 GPU is required when a configured GPU host is part of the acceptance environment; CPU-only operation remains valid for non-GPU hosts. US6 explicit user-data mount is P2 and may follow the core MVP without architectural redesign.
-
-### Incremental Delivery
-
-- **Increment A**: Setup + foundation + US1 → trusted source opens locally only after full sandbox/collaboration gates pass.
-- **Increment B**: US2 → persistent editable local notebook, active-path move, safe writes, Save a Copy.
-- **Increment C**: US3 → same-kernel agent operation with conflict/lease/cancellation/output enforcement.
-- **Increment D**: US5 + US7 → exhaustive security regression verification and predictable lifecycle.
-- **Increment E**: US4 → GPU parity where configured.
-- **Increment F**: US6 → explicit local external-data grant.
-- **Final**: Cross-story end-to-end/conformance acceptance and documentation.
-
----
-
-## Notes
-
-- `[P]` means different files/no unresolved dependency, not merely “could be done by another person.”
-- All story tasks carry `[US#]` labels; setup/foundational/polish tasks intentionally do not.
-- SQLite stores control metadata only; notebook/cell contents, raw Jupyter credentials, and full large/binary output payloads must not be stored there.
-- The initial MCP implementation targets Datalayer `jupyter-mcp-server` 2.x, but the semantic launcher contract remains backend-neutral.
-- Backend real-time-collaboration behavior must pass explicit browser↔agent persistence/conflict tests; silent last-write-wins is a conformance failure.
-- The complete standard sandbox is a prerequisite to first notebook/agent execution, not a later security increment.
-- Generic workspace file operations cannot bypass the active notebook's authoritative document/version boundary.
-- GitHub remains immutable source input throughout this feature.
-- The separate Spec Kit/no-shell connector tooling limitation is a follow-up development-tooling concern, not an implementation task for the Notebook Launcher feature.
+- Phase 2 blocks all stories.
+- US1 source preview/authorization/trust precedes executable launch.
+- US5 sandbox/network policy must be complete before US1 runtime can become ready.
+- US2 persistence and US3 MCP can proceed after first safe ready runtime, with module-aware parallelism.
+- US3 cancellation acceptance depends on Jupyter request ownership observation, not merely an interrupt API.
+- US6 depends on workspace persistence + sandbox mount boundary.
+- US7 reopen depends on launch authorization, persistence, and session ownership.
+- Implementation MUST NOT weaken fixed review-remediation invariants to fit an upstream backend.

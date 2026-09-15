@@ -2,159 +2,166 @@
 
 ## Purpose
 
-Define Colab-like local persistence, trust, concurrency, active-notebook safety, and runtime ownership without making GitHub a write target.
+Define local launch authorization, stable source trust, workspace persistence, active-notebook targeting, canonical local-data grants, and runtime ownership without making GitHub a write target.
 
 ## Separation of concerns
 
 ```text
-GitHub source @ SHA  -> immutable source snapshot
-                         |
-                         v
-                    persistent workspace
-                    work/ + outputs/
-                         |
-                         v
-                    disposable runtime
-             full standard sandbox + Jupyter
-             shared notebook document + MCP
+GET /open preview        non-executing
+local POST authorization one-time request-bound compute start permission
+source trust             persistent permission for repository code
+source snapshot          immutable provenance @ stable repo ID + SHA
+workspace                persistent mutable local state
+runtime                  disposable sandbox/Jupyter/kernel/MCP
 ```
 
-Control metadata is transactional local state; notebook/workspace data remains ordinary files.
+## Launch preview and authorization
+
+### GET preview
+
+`GET /open?...` may validate/normalize, resolve public GitHub metadata/ref, and render a local preview. It MUST NOT start build/setup/runtime/kernel/notebook execution.
+
+The page contains a short-lived signed launch token bound to the normalized request. It is protected from framing and is not placed back into the public GET URL.
+
+### POST authorization
+
+A local user gesture submits the token to the side-effecting launch endpoint. The server verifies:
+- token signature/expiry;
+- request digest;
+- one-time JTI/replay state;
+- loopback/same-origin browser context according to local policy;
+- stable repository/workspace identity has not changed.
+
+Only after this gate may an executable launch be created.
+
+Existing source trust removes only the source-trust prompt; launch authorization is still required.
+
+Stopped workspace reopen also requires a new authorization. An already-active workspace may return/direct to its current session after POST without creating another runtime.
+
+## Source trust lifecycle
+
+Trust uses stable GitHub repository identity:
+- exact commit: repository ID + SHA;
+- repository-wide: repository ID.
+
+Current owner/name is display/clone metadata, not the trust key.
+
+- rename or transfer with same repository ID: trust continues;
+- deletion/recreation under same owner/name with new repository ID: trust does not continue;
+- trust revocation affects future launch authorization but does not silently terminate an already-running session;
+- deny/cancel creates no positive trust grant and repository code/setup does not execute.
 
 ## Fresh source launch
 
-1. Validate the GitHub notebook request and resolve source to immutable SHA.
-2. Check active exact-commit/repository trust records.
-3. If uncovered, render local trust challenge with one-time nonce and offer `trust exact commit`, `trust repository`, or deny/cancel.
-4. Execute no repository-supplied setup/code until trust succeeds.
-5. Acquire immutable source material.
-6. Create a new workspace ID.
-7. Materialize an editable working copy separately from immutable source provenance.
-8. Create persistent `outputs/`.
-9. Prepare/reuse the environment.
-10. Claim the workspace's single active-session slot transactionally.
-11. Construct and validate the complete standard sandbox policy.
-12. Start JupyterLab with collaboration support and launcher save/version integration inside that sandbox.
-13. Mark the session ready only after sandbox, collaboration, and notebook readiness checks succeed.
+After launch authorization and trust:
 
-A fresh source launch creates a fresh workspace by default; it does not silently reuse a prior edited workspace.
+1. validate/reconfirm stable repository ID + immutable SHA + notebook path;
+2. acquire immutable source material;
+3. create a fresh workspace;
+4. materialize editable `work/` + persistent `outputs/`;
+5. prepare/reuse environment;
+6. claim the workspace single-active-session slot transactionally;
+7. construct/verify complete sandbox + egress policy;
+8. start JupyterLab collaboration/save-version integration;
+9. mark ready only after sandbox/network/collaboration/notebook readiness gates.
 
 ## Reopen
 
-Reopening by `workspace_id` MUST NOT reset files from GitHub.
-
-- If no active session exists, claim the workspace session slot and start a new runtime against the existing working copy.
-- If an active session already exists, return/direct the user to that session rather than creating another runtime.
-- If recorded active ownership is stale after a crash, reconcile against the actual runtime before clearing the ownership record.
-- If the cached environment image is missing, rebuild from recorded provenance without replacing workspace contents.
-- If the recorded active notebook path no longer exists because of an unsupported out-of-band move/delete, fail clearly rather than selecting another notebook automatically.
+- GET preview is non-executing.
+- local POST authorization is required before restarting compute.
+- existing mutable work is reused; no reset from GitHub.
+- live existing session is reused/directed to, not duplicated.
+- stale session ownership is cleared only after runtime death is confirmed.
+- missing active notebook path fails clearly rather than guessing another notebook.
 
 ## Stop
 
-Stopping a session:
+Stopping:
+- stops/removes runtime;
+- invalidates Jupyter/MCP credentials, writable lease, execution handles;
+- releases active-session slot;
+- preserves workspace, outputs, trust records, and reusable environment cache.
 
-- stops/removes the runtime container/process;
-- invalidates Jupyter/MCP credentials;
-- invalidates/releases writable-agent lease and execution-control handles;
-- releases the workspace active-session slot;
-- leaves workspace files, notebook edits, outputs, trust records, and reusable environment cache intact.
+Workspace deletion is future scope.
 
-The launcher does not automatically delete persistent workspaces in this MVP. User-facing workspace deletion is a separately specified future management capability; until then, a user may remove workspace data manually outside the launcher.
+## Active notebook semantics
 
-## Writable workspace semantics
+`Workspace.active_notebook_path` is the launcher-designated MCP notebook target.
 
-The default writable agent may create, read, modify, rename, and delete files anywhere inside the persistent workspace. `/outputs` is a conventional artifact location, not a mandatory write-only enclave.
+- Browser may open/focus other notebooks in JupyterLab.
+- Browser focus/tab selection MUST NOT mutate `active_notebook_path`.
+- MCP notebook/cell/execution operations continue to target the designated active notebook.
+- Supported active-notebook rename/move uses notebook-aware operation and updates the path.
+- Explicit retarget to another notebook is outside this MVP.
 
-The active notebook is still writable, but it is governed by notebook-aware shared-document operations. Generic workspace file write/move/delete MUST reject the active notebook path so they cannot bypass document conflict/version semantics. Active-notebook rename/move uses a supported notebook/Jupyter operation and updates `active_notebook_path`.
-
-Paths outside the workspace remain inaccessible unless the user explicitly granted local data. An `ro` user-data grant remains read-only even for a writable agent.
+Generic workspace file write/move/delete rejects the active notebook path.
 
 ## Conflict semantics
 
-Browser and MCP share the same authoritative Jupyter collaborative notebook document.
+Browser and MCP share one authoritative Jupyter collaborative document for the active notebook.
 
-- Normal browser edits participate directly in that shared document and advance its opaque `document_version`.
-- Agent notebook mutations require the version they were based on.
-- A stale agent version rejects the mutation with `conflict` and no write occurs.
-- Any independent full-document/file save path that could replace the active notebook outside the shared document is guarded by launcher/Jupyter save-version integration; stale saves are rejected and require refresh/retry.
-- Non-notebook files use analogous `file_version` preconditions for overwrite/move/delete.
-- The implementation MUST NOT silently use last-write-wins for stale writes.
+- normal browser edits advance authoritative document/version;
+- agent mutation requires expected version;
+- stale mutation → conflict/no write;
+- stale independent full-file save that would replace active notebook is rejected;
+- non-notebook files use analogous file versions.
 
-The initial MCP/Jupyter collaboration stack must pass acceptance tests proving browser edits remain persistent after agent edits, agent edits remain persistent after browser edits, and a deliberately stale independent save cannot overwrite the authoritative notebook.
+## Execution lifecycle
 
-## Active notebook rename/move
+Agent execution is mediated by a broker.
 
-A supported active-notebook rename/move:
+- Browser-owned busy kernel → agent request remains queued.
+- Queue cancellation/timeout → no interrupt.
+- Dispatched request is not considered active until Jupyter busy-parent/request identity matches its message ID.
+- Cancel before ownership confirmation → `cancel_pending`, no interrupt of browser work.
+- Once agent request becomes active-owned, cancel/timeout may interrupt it.
+- Unresponsive agent-owned execution may trigger kernel restart after bounded grace; workspace persists.
 
-1. validates the destination remains within the workspace and ends in `.ipynb`;
-2. operates through the authoritative Jupyter/notebook path rather than generic file mutation;
-3. preserves/advances document version semantics;
-4. updates `Workspace.active_notebook_path` as part of the successful operation;
-5. causes future MCP attachment/status/reopen to target the new path.
+## Local data grant
 
-A failed rename leaves the prior path authoritative. An unsupported external rename/delete is reported as missing state; the launcher does not guess a replacement notebook.
+No extra host directory is exposed by default.
 
-## Persistent-write failure semantics
+Grant creation:
+1. local user selects directory + `ro|rw`;
+2. resolve canonical root;
+3. apply forbidden/whole-home checks to canonical root;
+4. persist display path + canonical root;
+5. revalidate before mount/use.
 
-Launcher-managed replacement writes use safe/atomic replacement behavior appropriate to the filesystem. Jupyter notebook saves retain atomic-save behavior or equivalent protection.
+Remote launch references cannot create/change grants.
 
-If the filesystem reports `ENOSPC` or another replacement failure:
+### Host-side containment
 
-- the operation fails with an actionable storage error;
-- the previously saved file remains authoritative and intact;
-- a partial temporary file MUST NOT replace it;
-- workspace metadata is not advanced as if the write succeeded.
+Host-side reads/writes/copies under a grant MUST be anchored to the canonical root using symlink/reparse-safe no-follow or dirfd-equivalent path resolution. String prefix is not sufficient.
 
-## Save a Copy
+Reject:
+- `..` escape;
+- symlink/junction/reparse path component that resolves outside the root;
+- magic-link/equivalent escape;
+- destination root/path swapped between validation and open;
+- missing/replaced grant root.
 
-Save a Copy duplicates a notebook to:
+Save a Copy to `user_data` follows these rules and requires writable grant.
 
-- a validated workspace-relative path; or
-- a validated relative path under an explicitly configured writable user-data grant.
+## Persistent write safety
 
-Rules:
-
-- destination remains within selected scope;
-- destination ends in `.ipynb`;
-- overwrite defaults false;
-- current saved outputs may be included;
-- operation snapshots the current saved notebook state;
-- replacement follows persistent-write failure semantics;
-- operation never changes immutable source provenance;
-- operation never commits, pushes, creates branches, or mutates GitHub.
-
-## User-data grant
-
-No host directory is mounted by default. The local user explicitly selects one directory and `ro`/`rw` mode through local management (MVP CLI contract). Remote launch URLs cannot specify the host path. The runtime sees the grant at a stable path such as `/mnt/user-data`.
-
-The launcher MUST NOT automatically mount the whole home directory. Live mount-policy changes may require the active workspace session to stop/restart; the launcher reports this explicitly.
-
-## Trust lifecycle
-
-- exact-commit trust authorizes only that repository + immutable SHA;
-- repository trust authorizes future revisions from that same repository;
-- trust is stored locally and may be revoked for future launches;
-- revocation does not silently terminate an already-running session;
-- deny/cancel creates no positive trust grant and executes no repository code/setup.
-
-## Agent attachment lifecycle
-
-A ready writable session supports at most one active writable MCP lease. A second writable attachment is rejected until the lease is released or reconciled stale. Read-only attachments do not acquire the writable lease, but concurrent multiple read-only attachments are not guaranteed by the MVP.
-
-Session stop invalidates all launcher-owned MCP runtime state and active execution-control handles.
-
-## Execution cancellation lifecycle
-
-Agent execution receives an operation ID and local deadline. Cancellation/deadline expiry interrupts the active kernel operation. If interrupt does not restore responsiveness within the configured grace interval, runtime policy may restart/replace the kernel while preserving the workspace. The result remains distinguishable as `cancelled` or `timeout`.
-
-Cancellation ends the execution request, not the persistent workspace.
+Atomic/safe replacement preserves last good file on `ENOSPC` or comparable failure. Metadata does not advance on failed replacement.
 
 ## Outputs
 
-`outputs/` is persistent workspace-owned artifact storage intended for generated models, CSV/JSON files, images, reports, checkpoints, or other notebook results. Runtime cleanup never deletes it.
+`outputs/` persists independently of runtime. Agent-facing output is separately bounded; full authoritative output remains in notebook/workspace and is not copied into audit logs by default.
 
-Agent-facing output retrieval is separately bounded (default 1 MiB serialized response per operation). Oversized/binary/multimodal output is represented with truncation/type/size/reference metadata while the complete authoritative output remains in the notebook/workspace. Audit metadata does not copy full output payloads by default.
+## Network lifecycle
+
+Runtime readiness includes default egress verification:
+- public globally routable Internet destinations allowed;
+- non-global/local destinations denied by default;
+- configured DNS resolver endpoints explicitly allowed as infrastructure;
+- no host-gateway alias/bypass;
+- inbound launcher/Jupyter publication loopback-only.
+
+Network policy is applied by launcher/runtime infrastructure and is not removable by notebook code.
 
 ## Git semantics
 
-GitHub is immutable source input. The launcher exposes no Git publishing workflow. The editable working tree is not given GitHub write credentials and should not depend on a writable Git remote relationship.
+GitHub is immutable source input only. No Git commit/push/branch/write credentials are exposed.

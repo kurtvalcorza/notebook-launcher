@@ -2,83 +2,127 @@
 
 ## Purpose
 
-Define implementation-neutral agent capabilities for a ready `NotebookSession`. Backend tool names are private adapter details.
+Define implementation-neutral MCP semantics for a ready launcher-created notebook session. Backend-specific tools are private adapter details.
 
-## Same-runtime invariant
+## Same-runtime and fixed-target invariants
 
-All MCP operations target the same Jupyter server, persistent workspace, authoritative active notebook document, kernel lifecycle, sandbox, GPU policy, and resource limits visible to the browser. No hidden second execution environment is permitted.
+MCP uses the same Jupyter server, workspace, sandbox, network policy, GPU scope, active kernel, and launcher-designated `active_notebook_path` visible to the user.
 
-## Agent profiles
+Opening or focusing another notebook in JupyterLab MUST NOT silently change the MCP target. The MVP has no focus-based retarget operation. Supported rename/move of the active notebook updates the target; explicit retargeting to another notebook is future scope.
 
-### `write` (default)
+## Profiles
 
-Required capabilities:
+### `write`
+
+Required semantic capabilities:
 
 | Capability | Semantics |
 |---|---|
-| `notebook.read` | Read active notebook structure/cells/outputs and current `document_version` |
-| `cell.read` | Read a cell and current `document_version` |
-| `cell.insert` | Insert a cell using `expected_document_version` |
-| `cell.update` | Edit cell source using `expected_document_version` |
-| `cell.delete` | Delete a cell using `expected_document_version` |
-| `notebook.move` | Rename/move the active notebook through the authoritative notebook/Jupyter path and update active-notebook metadata |
-| `cell.execute` | Execute one code cell in active kernel and return an execution operation ID |
-| `notebook.execute_all` | Execute code cells in notebook order and return an execution operation ID |
-| `execution.cancel` | Cancel/interrupt an active agent execution operation |
-| `kernel.execute_code` | Execute diagnostic code in active kernel and return an execution operation ID |
-| `output.read` | Retrieve a bounded representation of execution/cell output |
-| `kernel.restart` | Restart/reconnect session kernel |
-| `workspace.file.read` | Read a non-active-notebook file inside the persistent workspace and return `file_version` |
-| `workspace.file.write` | Create/replace a workspace file; existing files require `expected_file_version`; active notebook path is rejected |
-| `workspace.file.move` | Rename/move a workspace file with version/precondition checks; active notebook path is rejected in favor of `notebook.move` |
-| `workspace.file.delete` | Delete a workspace file using `expected_file_version`; active notebook path is rejected |
-| `workspace.file.list` | List bounded workspace paths/metadata |
-
-A backend/adapter missing any required writable capability is not conformant for the default MVP profile. The launcher MAY implement or supplement capabilities outside the underlying backend when required to preserve these semantics.
+| `notebook.read` | Read active notebook + `document_version` |
+| `cell.read` | Read active-notebook cell + version |
+| `cell.insert` | Insert using `expected_document_version` |
+| `cell.update` | Edit using version precondition |
+| `cell.delete` | Delete using version precondition |
+| `notebook.move` | Rename/move active notebook through authoritative Jupyter path |
+| `cell.execute` | Queue/execute one active-notebook code cell; return operation ID |
+| `notebook.execute_all` | Execute code cells in order through broker |
+| `kernel.execute_code` | Queue diagnostic code through broker |
+| `execution.cancel` | Cancel an agent-owned execution operation only |
+| `output.read` | Return bounded output representation |
+| `kernel.restart` | Restart/reconnect kernel when policy permits |
+| `workspace.file.read` | Read ordinary workspace file/version |
+| `workspace.file.write` | Create/replace ordinary file; active notebook rejected |
+| `workspace.file.move` | Move ordinary file; active notebook rejected |
+| `workspace.file.delete` | Delete ordinary file; active notebook rejected |
+| `workspace.file.list` | Bounded workspace listing |
 
 ### `readonly`
 
-Required capabilities are inspection-only:
+Allowed: `notebook.read`, `cell.read`, `output.read`.
 
-- `notebook.read`
-- `cell.read`
-- `output.read`
+Denied: execution, cancellation, kernel restart, notebook mutation/move, workspace file mutation, permission escalation.
 
-The launcher/MCP boundary MUST reject cell execution, whole-notebook execution, arbitrary kernel code, execution cancellation of another controller's operation, kernel restart, notebook mutation/move, and workspace-file mutation for readonly attachments. Readonly does not consume the writable-agent lease.
-
-The MVP does not guarantee multiple simultaneous readonly clients. A backend/bridge MAY serialize readonly attachments; it MUST still support the readonly profile when admitted.
-
-## Authoritative notebook and optimistic concurrency contract
-
-The active notebook is represented by one authoritative Jupyter collaborative document. Normal JupyterLab browser edits participate directly in that shared document. Every authoritative document change advances an opaque launcher-visible `document_version`.
-
-Every MCP notebook/cell mutation MUST provide `expected_document_version` from the state the mutation was based on. If it does not match the authoritative current document, the operation returns a structured `conflict` result containing the new current version and performs no mutation.
-
-Any independent full-document/file save path capable of replacing the active notebook outside the shared collaboration document MUST be guarded by launcher/Jupyter save-version integration. A stale save is rejected and must refresh/retry rather than replacing newer state.
-
-Generic `workspace.file.write|move|delete` MUST reject the active notebook path. Active-notebook rename/move uses `notebook.move`, preserving document/version semantics and atomically updating `active_notebook_path` as part of the supported operation.
-
-Workspace non-notebook file reads return an opaque `file_version`. Mutations of existing files require the expected version. Create operations may use a `must_not_exist` precondition. The version format is intentionally opaque so the implementation can use collaboration revisions, hashes, or another safe mechanism without changing the semantic contract.
-
-No adapter may silently resolve stale writes with last-write-wins.
+Readonly does not consume the writable lease. Concurrent multiple readonly clients are not an MVP guarantee.
 
 ## Writable-agent lease
 
-A session may have at most one active writable MCP attachment. `notebook-launcher mcp <session-id>` in writable mode MUST acquire a transactional write lease before exposing mutation/execution capabilities.
+At most one writable MCP attachment may hold a session lease.
 
-- second writable attachment → `writable_agent_busy`;
-- normal disconnect → release lease;
-- bridge crash → lease becomes reclaimable only after liveness/reconciliation rules confirm it is stale;
-- session stop → invalidate lease;
-- read-only attachment → no write lease.
+- second writer → `writable_agent_busy`;
+- normal disconnect → release;
+- crash → reclaim only after stale reconciliation;
+- session stop → invalidate;
+- descriptor retrieval does not acquire lease.
 
-The lease serializes writable agents; it does not block normal interactive browser use. Browser/agent conflict safety comes from the shared document plus version/save guards, not from blocking the browser.
+## Authoritative document and conflicts
+
+The active notebook is one Jupyter collaborative document. Normal browser edits participate in it. Reads expose an opaque `document_version`; agent mutations require the version they were based on.
+
+Stale mutation → structured `conflict`, current version, no write.
+
+Any independent full-file save path that could replace the active notebook must carry/derive equivalent version protection. Generic workspace file write/move/delete rejects the active notebook path.
+
+No backend may silently use last-write-wins.
+
+## Execution broker
+
+All agent kernel execution passes through a session-local broker. Browser execution remains possible directly through Jupyter, so the broker MUST observe actual Jupyter kernel/request ownership rather than assume that a dispatched agent request is active.
+
+### Operation states
+
+```text
+queued
+  | dispatch only when kernel observed idle
+  v
+dispatched
+  | observe busy/status parent request ID
+  v
+running
+  |                    |
+  v                    v
+completed/failed   cancelling -> cancelled/timeout
+```
+
+Additional state `cancel_pending` applies when cancellation is requested after dispatch but before the agent request is confirmed as the active busy-parent request.
+
+### Ownership identifiers
+
+Every dispatched agent execution records:
+- launcher operation ID;
+- Jupyter execute/request message ID;
+- queue/dispatched timestamps;
+- current observed kernel busy state;
+- observed parent message ID for the active kernel request.
+
+The broker considers an agent operation **active-owned** only when the kernel’s active/busy parent request ID matches the operation’s Jupyter message ID.
+
+### Dispatch
+
+1. While kernel is observed busy with a browser/other non-agent request, keep agent execution queued.
+2. Dispatch only after an idle observation.
+3. Do not infer ownership from dispatch alone; confirm via Jupyter status/request correlation.
+4. Agent operations are serialized by the broker; execute-all uses the same rule for each executed cell/request.
+
+### Cancellation and timeout
+
+- Cancelling/timing out `queued` operation: terminate/remove it, no kernel interrupt.
+- Cancelling/timing out `dispatched` but not active-owned: set `cancel_pending`; do not interrupt the kernel.
+- If a cancel-pending request later becomes active-owned: interrupt immediately.
+- Cancelling/timing out `running` active-owned request: issue Jupyter kernel interrupt.
+- A kernel-wide interrupt MUST NOT be sent while the active busy-parent request belongs to browser/other work.
+- After interrupt, wait bounded grace. If the agent-owned request/kernel remains unresponsive, restart/replace kernel per policy while preserving workspace files.
+- `cancelled`, `timeout`, Python exception, kernel death, permission denial, lease denial, and transport failure remain distinct results.
+
+The browser may enqueue work after an agent request; an interrupt against a confirmed active agent request may affect only current kernel execution semantics, not intentionally target queued browser work.
 
 ## Attachment descriptor
+
+Example:
 
 ```json
 {
   "session_id": "<uuid>",
+  "notebook_path": "tutorials/example.ipynb",
   "available": true,
   "status": "available",
   "transport": "stdio",
@@ -87,114 +131,57 @@ The lease serializes writable agents; it does not block normal interactive brows
   "agent_mode": "write",
   "backend": "name/version",
   "write_lease_available": true,
-  "capabilities": ["notebook.read", "cell.update", "cell.execute", "execution.cancel", "workspace.file.write"]
+  "capabilities": ["notebook.read", "cell.update", "cell.execute", "execution.cancel"]
 }
 ```
 
-The descriptor MUST NOT contain raw Jupyter/backend credentials. Retrieving it does not acquire the writable-agent lease.
+No raw Jupyter/backend credential appears in the descriptor.
 
-## Initial backend adapter
+## Initial backend
 
-The first implementation targets Datalayer `jupyter-mcp-server` 2.x connected to the launcher-created Jupyter server. The adapter MAY filter, wrap, or supplement backend tools to satisfy this contract, including workspace file operations, permission checks, collaboration/version preconditions, active-notebook file guards, execution cancellation, output bounding, and lease enforcement.
+Initial target: Datalayer `jupyter-mcp-server` 2.x against launcher-created Jupyter. The launcher may filter/wrap/supplement backend tools to satisfy this contract.
 
-The exact backend/Jupyter collaboration patch versions are pinned only after conformance tests pass. Backend-specific tool names and schemas are never the public launcher contract.
+Exact backend/Jupyter collaboration versions are pinned only after conformance tests pass. Product semantics are not weakened to fit the backend.
 
-## Local stdio bridge
+## Bounded output
 
-Preferred MVP invocation:
+Default maximum serialized MCP output payload: 1 MiB/operation, configurable.
 
-```text
-notebook-launcher mcp <session-id>
-```
-
-The bridge resolves private state, validates the session/profile, acquires a writable lease when required, starts/connects the selected backend, injects Jupyter credentials internally, enforces semantic permissions/version/output/cancellation rules, proxies MCP over stdio, and exits/reconciles when the client disconnects or session becomes invalid.
-
-## Execution semantics
-
-### Single cell
-
-Execution occurs through the active Jupyter kernel. The request receives an execution operation ID and returns success/failure plus stdout/stderr/display/traceback through the bounded output policy.
-
-### Whole notebook
-
-`notebook.execute_all`:
-
-- executes code cells in notebook order;
-- uses the active Jupyter kernel;
-- defaults to stop-on-error;
-- identifies the failing cell;
-- preserves notebook/kernel state;
-- exposes an execution operation ID that can be cancelled;
-- MUST NOT silently convert the notebook into an unrelated Python script/runtime.
-
-### Timeout and cancellation
-
-Every agent execution uses a configurable deadline unless explicitly configured otherwise within local policy. `execution.cancel(operation_id)` or deadline expiry MUST terminate the requested execution path rather than merely relabel a still-running operation.
-
-Cancellation behavior:
-
-1. request a Jupyter kernel interrupt for the active execution;
-2. wait a bounded grace interval for the kernel to become responsive;
-3. if the kernel remains unresponsive, restart/replace the kernel according to runtime policy while preserving persistent workspace files;
-4. return a distinct `cancelled` or `timeout` result;
-5. leave the notebook session usable when the surrounding runtime remains healthy.
-
-A kernel exception is an execution result, not automatically an MCP transport failure. Conflict, Python exception, timeout, cancellation, kernel death, permission denial, lease denial, and MCP transport failure are distinct outcomes.
-
-## Bounded output contract
-
-The default maximum serialized MCP output payload is **1 MiB per operation**, configurable locally.
-
-- Oversized text MUST set `truncated=true` and include original-size metadata when known.
-- Binary/multimodal output MUST return MIME/type/size metadata and only a bounded preview/reference representation through MCP.
-- The full authoritative output remains in the notebook/workspace according to normal Jupyter persistence.
-- Full output payloads MUST NOT be copied into bounded audit records by default.
-
-The output limit constrains the control channel; it does not erase or truncate the notebook's persisted authoritative output.
-
-## Persistence and storage errors
-
-Agent edits target the persistent working notebook/shared Jupyter document. Agent-generated non-notebook files anywhere inside `/workspace` persist with the workspace. `/outputs` is the recommended conventional artifact location, not the only writable path.
-
-Launcher-managed replacement file operations MUST fail safely on disk-full/comparable errors. An unsuccessful replacement MUST NOT leave a partial file as the authoritative state.
-
-## Save a Copy
-
-Save a Copy remains a launcher/workspace operation. If exposed to agents later, it maps to an explicit semantic launcher capability and never to Git commit/push.
+- oversized text: `truncated=true`, size metadata when known;
+- binary/multimodal: MIME/type/size + bounded preview/reference;
+- full authoritative output remains in notebook/workspace;
+- full payload is not copied into audit logs by default.
 
 ## Security invariants
 
-- MCP inherits the already-verified standard runtime sandbox and explicit mounts.
-- The session is not advertised ready for agent execution until mandatory sandbox and collaboration readiness gates pass.
-- No Docker socket, host SSH keys, GitHub/cloud credentials, or unrelated host directories.
-- No Git commit/push/branch/GitHub mutation capability in this feature.
+- MCP inherits already-verified sandbox and egress policy.
+- No host credentials/Docker socket/GitHub write capability/unrelated host directories.
 - Session A cannot resolve Session B private state.
-- Readonly cannot escalate to write without explicit authorization/session policy.
-- A second writable agent cannot bypass the active write lease.
-- Generic file operations cannot overwrite/delete/move the active notebook outside notebook-aware semantics.
-- Stopping the session invalidates MCP private state/bridges/leases/execution handles.
-- Audit logs omit raw credentials, full cell contents, and full large/binary output payloads by default.
+- Readonly cannot escalate.
+- Generic file operations cannot bypass active-notebook semantics.
+- Session stop invalidates bridge/lease/execution handles.
+- Browser focus does not retarget MCP.
 
-## Writable conformance test
+## Writable conformance tests
 
 A backend/adapter is accepted only when it can:
 
-1. attach without manual Jupyter token entry;
-2. read the active notebook and version;
-3. edit a cell with a valid version precondition;
-4. reject a deliberately stale agent edit without overwriting the newer browser edit;
-5. preserve normal browser edits through the authoritative collaboration document and reject a deliberately stale independent save path;
-6. execute a cell and the full notebook in order;
-7. cancel a deliberately non-terminating execution or terminate it at its configured timeout and continue using the persistent workspace;
-8. surface a deliberate failure, repair it, and re-execute;
-9. create/edit/rename/delete representative non-notebook workspace files;
-10. reject generic file overwrite/move/delete against the active notebook and successfully rename/move it through `notebook.move`, updating active-notebook metadata;
-11. restart the kernel;
-12. preserve bidirectional browser↔agent notebook edits on disk;
-13. return bounded/truncation/type metadata for representative oversized text and binary/multimodal output while preserving full notebook output;
-14. reject a second simultaneous writable agent attachment;
-15. on GPU sessions, observe the same GPU as browser execution.
+1. attach without manual token entry;
+2. read active notebook/version;
+3. edit with valid version and reject stale edit;
+4. preserve browser↔agent edits through shared document;
+5. execute cell and notebook in order;
+6. surface/repair a controlled failure;
+7. cancel a running agent-owned non-terminating request and continue;
+8. while a browser request is running, queue an agent request then cancel/timeout it without interrupting the browser request;
+9. handle an idle→dispatch race without interrupting a non-agent active parent request;
+10. create/edit/move/delete ordinary workspace files while rejecting generic active-notebook mutation;
+11. move active notebook through `notebook.move` and update metadata;
+12. return bounded large/binary output;
+13. reject a second writable attachment;
+14. preserve fixed MCP target when user opens/focuses another notebook;
+15. on GPU session, observe same GPU as browser.
 
-## Readonly conformance test
+## Readonly conformance tests
 
-A readonly attachment can inspect notebook/cells/outputs and receives explicit permission errors for execution, execution cancellation, notebook move/mutation, kernel restart, workspace-file mutation, and write escalation.
+Readonly can inspect and receives explicit permission failures for execution, cancellation, kernel restart, notebook move/mutation, workspace mutation, and escalation.

@@ -4,9 +4,9 @@
 
 **Created**: 2026-09-15
 
-**Status**: Draft
+**Status**: Draft — post-review remediation
 
-**Input**: User description: "Create a local, Colab-like launcher for user-trusted public GitHub notebooks. The user should be able to open, run, edit, save, stop, and reopen a persistent local copy; optionally use a local GPU; and let MCP-capable agents inspect, edit, execute, diagnose, and repair the same notebook session. The feature must never commit, push, create branches, or otherwise modify GitHub."
+**Input**: "Create a local, Colab-like launcher for user-trusted public GitHub notebooks. The user should be able to open, run, edit, save, stop, and reopen a persistent local copy; optionally use a local GPU; and let MCP-capable agents inspect, edit, execute, diagnose, and repair the same notebook session. The feature must never commit, push, create branches, or otherwise modify GitHub."
 
 ## Clarifications
 
@@ -18,268 +18,247 @@
 - Q: Should a single persistent workspace allow more than one active notebook session at the same time, or only one active session per workspace? → A: Only one active notebook session is allowed per workspace.
 - Q: Should more than one MCP-capable agent be allowed to attach to the same active notebook session at the same time? → A: Only one writable MCP agent may be attached to an active notebook session at a time; another writable agent must wait until the current writable agent disconnects.
 
-## User Scenarios & Testing *(mandatory)*
+### Review remediation 2026-09-15
 
-### User Story 1 - Open a Trusted GitHub Notebook Locally (Priority: P1)
+- Opening a launcher URL is separated from authorizing execution. A GET may resolve/render a local preview but MUST NOT start repository build/runtime execution. Every fresh launch or stopped-workspace reopen requires a short-lived one-time local launch authorization gesture, even when source trust already exists.
+- Repository-wide trust follows the immutable GitHub repository object identity, not mutable `owner/name` text. Rename/transfer preserves trust; delete-and-recreate at the same namespace does not.
+- Agent execution is serialized through an ownership-aware broker. Queued cancellation never interrupts the kernel. A kernel interrupt is permitted only while the active Jupyter request is owned by the cancelling agent operation.
+- Default notebook Internet access is limited to globally routable destinations plus explicitly approved infrastructure such as the configured DNS resolver. Host gateway, loopback, private/LAN, link-local, metadata, multicast, and other non-global local ranges are denied by default.
+- Host-side operations under an explicit local-data grant use canonical, symlink-safe containment; path text/prefix checks alone are insufficient.
+- The launcher-designated `active_notebook_path` is the MCP notebook target. Opening/focusing another JupyterLab notebook does not silently retarget the agent.
 
-As a user, I can open a public GitHub notebook locally from its notebook reference without manually cloning the repository or starting a notebook server myself.
+## User Scenarios & Testing
 
-**Why this priority**: This is the primary entry point and the local equivalent of opening a GitHub notebook in a hosted notebook service.
+### User Story 1 — Open a Trusted GitHub Notebook Locally (Priority: P1)
 
-**Independent Test**: Provide a valid public GitHub notebook reference, approve the source when prompted, and verify that the exact requested notebook opens locally inside the complete standard sandbox.
+As a user, I can paste/open a public GitHub notebook reference, review the locally resolved source, explicitly authorize this launch, and open the requested notebook without manually cloning or starting Jupyter.
+
+**Independent Test**: Navigate to a supported `/open?...` URL, confirm that GET alone does not build/start a runtime, use the local authorization control, complete trust if needed, and verify the exact notebook opens inside the standard sandbox.
 
 **Acceptance Scenarios**:
 
-1. **Given** a valid public GitHub notebook reference, **When** the user launches it, **Then** the exact requested notebook opens in a local notebook session.
-2. **Given** a mutable source reference such as a branch or tag, **When** launch begins, **Then** the session records the exact immutable source revision used.
-3. **Given** a source that is not covered by an existing local trust decision, **When** execution would begin, **Then** the user is offered two trust scopes: trust the exact resolved commit or trust the repository for future revisions.
-4. **Given** the user selects exact-commit trust, **When** that same commit is launched again, **Then** the prior trust decision is reused, while a different commit requires a new decision unless repository-wide trust was later granted.
-5. **Given** the user selects repository-wide trust, **When** a future revision from that same repository is launched, **Then** the prior repository trust decision is reused without another source-trust prompt.
-6. **Given** the user cancels or declines trust, **When** the request is cancelled, **Then** no notebook code or repository-supplied setup is executed.
-7. **Given** a notebook requires a source-declared dependency absent from the user's unrelated host Python environment, **When** the prepared local notebook session becomes ready, **Then** that dependency is available inside the notebook environment without modifying the unrelated host environment.
-8. **Given** the notebook runtime is about to start, **When** the launcher creates it, **Then** the complete standard sandbox policy is applied before notebook or agent code can execute.
+1. A valid public GitHub notebook resolves to repository metadata, immutable commit SHA, and normalized notebook path before execution.
+2. `GET /open` may show a preview/authorization page but starts no repo2docker build, repository setup, notebook server, kernel, or notebook code.
+3. A fresh launch requires a one-time local launch authorization token/gesture tied to the normalized request, even when exact-commit or repository-wide trust already covers the source.
+4. A source not already trusted additionally prompts for exact-commit trust or repository-wide trust before repository-supplied setup/code can run.
+5. Denying launch authorization or source trust produces zero repository-supplied setup/notebook execution.
+6. Exact-commit trust is reused only for the same stable repository object + commit SHA.
+7. Repository-wide trust is reused for future revisions of the same stable repository object, including after rename/transfer, until revoked.
+8. A repository recreated at the same `owner/name` but with a different GitHub repository ID is not covered by the prior repository-wide trust record.
+9. A source-declared dependency absent from unrelated host Python is available in the prepared notebook environment without modifying host Python.
+10. The complete standard sandbox, collaboration readiness, and default egress policy are active before notebook/agent execution becomes available.
 
 ---
 
-### User Story 2 - Keep a Persistent, Editable Local Copy (Priority: P1)
+### User Story 2 — Keep a Persistent, Editable Local Copy (Priority: P1)
 
-As a user, I can work in a persistent local copy of the notebook, stop the running session, and later reopen my work without losing notebook edits, saved outputs, or generated artifacts.
-
-**Why this priority**: A local notebook launcher should behave like a practical working environment rather than a disposable viewer.
-
-**Independent Test**: Open a notebook, edit and run a cell, create an output artifact, stop the session, reopen the same workspace, and verify that the edit, saved output, and artifact are still present.
+As a user, I can edit a persistent local workspace, stop compute, and later reopen it without losing notebook edits, saved outputs, or generated artifacts.
 
 **Acceptance Scenarios**:
 
-1. **Given** a first launch from a trusted source revision, **When** the workspace is created, **Then** the original source provenance is retained separately from the editable working copy.
-2. **Given** an edited working notebook, **When** the running session stops, **Then** the workspace and its saved contents remain available.
-3. **Given** an existing workspace, **When** the user reopens it, **Then** the user's existing working copy is reopened rather than reset from the remote source.
-4. **Given** an active notebook, **When** the user chooses Save a Copy, **Then** a distinct notebook copy is created at a valid local destination without altering the original source.
-5. **Given** a Save a Copy destination that already exists, **When** overwrite has not been explicitly requested, **Then** the existing file is preserved and the user is asked to choose another destination or explicitly overwrite it.
-6. **Given** notebook-generated artifacts, **When** they are saved to the workspace's output area, **Then** they survive session shutdown and reopen.
-7. **Given** the active working notebook is renamed or moved through the supported notebook/Jupyter file operation, **When** the operation completes, **Then** the workspace records the new active notebook path and reopen targets that new path.
-8. **Given** a persistent workspace write fails because storage is full or another filesystem error occurs, **When** the write cannot complete atomically, **Then** the prior saved state remains intact and the user receives an actionable failure instead of a partially replaced file.
+1. Immutable source provenance remains separate from the editable working copy.
+2. A fresh remote-source launch creates a new persistent workspace by default.
+3. A stopped workspace reopens its existing working copy rather than resetting from GitHub, but restart of compute still requires a new local launch authorization gesture.
+4. Save a Copy creates a distinct local notebook and preserves an existing destination unless overwrite is explicit.
+5. Outputs and arbitrary workspace files survive runtime teardown/reopen.
+6. Supported active-notebook rename/move updates `active_notebook_path`; unsupported disappearance fails clearly.
+7. Disk-full/comparable replacement failure preserves the last good saved file and does not advance metadata as if successful.
 
 ---
 
-### User Story 3 - Let an Agent Operate the Same Notebook (Priority: P1)
+### User Story 3 — Let an Agent Operate the Same Notebook (Priority: P1)
 
-As a user of an MCP-capable coding agent, I can attach the agent to the same notebook session I am using and let it inspect, edit, execute, diagnose, and repair the notebook without creating a separate hidden execution context.
-
-**Why this priority**: Agent-operated notebook execution is a mandatory part of the MVP and a core reason for the launcher to exist beyond ordinary local notebook use.
-
-**Independent Test**: Attach a supported agent, have it read and edit a controlled cell, execute the notebook, encounter a deliberate failure, repair the failure, cancel a deliberately non-terminating execution, and continue in the same session visible to the user.
+As a user of an MCP-capable coding agent, I can attach it to the same authoritative notebook/kernel I am using and let it inspect, edit, execute, diagnose, repair, and cancel its own work without silently disrupting unrelated browser execution.
 
 **Acceptance Scenarios**:
 
-1. **Given** a ready notebook session, **When** the user connects a supported MCP-capable agent, **Then** the agent attaches to that same notebook workspace and execution state.
-2. **Given** the default writable agent profile, **When** the agent operates the notebook, **Then** it can read, add, edit, delete, and execute notebook cells within the allowed workspace.
-3. **Given** the read-only agent profile, **When** the agent inspects the notebook, **Then** it can read notebook, cell, and output state but cannot execute code or modify notebook or workspace contents.
-4. **Given** a whole-notebook execution request, **When** the agent runs it, **Then** code cells execute in notebook order using the active notebook state and stop at the first error by default.
-5. **Given** a cell failure, **When** execution returns, **Then** the failing cell and error context are available to the agent without automatically destroying the session.
-6. **Given** an agent reconnects after a client disconnect, **When** the notebook session is still active, **Then** the same workspace and current notebook state remain available.
-7. **Given** the notebook session has stopped, **When** an agent attempts to reconnect, **Then** the attachment is rejected rather than creating an orphan execution environment.
-8. **Given** the user and agent both operate on the active notebook, **When** an agent mutation or any stale full-document/file save is based on an older authoritative version, **Then** that stale write is rejected and must refresh/retry; normal interactive browser edits participate in the shared authoritative notebook document and must not be replaced by a stale independent save.
-9. **Given** the default writable agent profile, **When** the agent creates, edits, renames, or deletes files inside the persistent workspace, **Then** those changes are permitted subject to normal workspace conflict and persistence rules, while paths outside the workspace remain unavailable unless explicitly granted; the active notebook itself remains governed by notebook-aware document operations rather than generic file overwrite/delete operations.
-10. **Given** one writable MCP agent is already attached, **When** another writable MCP agent attempts to attach to the same active notebook session, **Then** the second writable attachment is rejected until the existing writable agent disconnects.
-11. **Given** an agent starts a long-running or non-terminating execution, **When** the configured execution deadline is reached or cancellation is requested, **Then** the launcher interrupts or otherwise terminates that execution, returns a distinct timeout/cancelled outcome, and preserves the persistent workspace.
-12. **Given** notebook output is unusually large, binary, or multimodal, **When** the agent retrieves that output, **Then** the control interface returns a bounded response with explicit truncation/type metadata while preserving the authoritative full notebook output on disk and excluding the payload from audit logs by default.
+1. The agent targets the same workspace, Jupyter server, authoritative notebook document, kernel, sandbox, GPU scope, and resource limits as the browser.
+2. Writable mode can inspect/insert/edit/delete notebook cells, execute cells/notebook/diagnostic code, restart the kernel, and manipulate ordinary workspace files.
+3. Readonly mode can inspect notebook/cells/outputs but cannot execute, cancel execution, restart, mutate notebook/workspace, or self-escalate.
+4. Whole-notebook execution uses the active kernel, preserves cell order, and stops at first error by default.
+5. Stale agent mutations or stale independent full-document saves are rejected rather than last-write-wins.
+6. Generic file operations cannot overwrite/move/delete the active notebook; active-notebook move uses notebook-aware semantics.
+7. At most one writable MCP attachment is active per session.
+8. Agent execution operations are serialized through an execution broker with states including queued/dispatched/running/cancelling/terminal and a Jupyter request message ID when dispatched.
+9. If browser execution owns the busy kernel, an agent operation waits/queues. Cancelling or timing out a queued agent operation does not interrupt the browser execution.
+10. If an agent request has been dispatched but is not the active busy-parent request, cancellation marks it for cancellation without interrupting the current browser-owned request; when/if that agent request becomes active it is interrupted immediately.
+11. A kernel-wide interrupt for agent cancellation/timeout is issued only when the current active Jupyter request/message ID is owned by that agent operation.
+12. Oversized text and binary/multimodal output returns a bounded agent representation while the authoritative notebook output remains persisted.
+13. Opening or focusing another notebook in JupyterLab does not change the MCP target; MCP remains bound to `active_notebook_path` unless a separately specified retarget feature is introduced.
 
 ---
 
-### User Story 4 - Use Local GPU Compute When Available (Priority: P1)
+### User Story 4 — Use Local GPU Compute When Available (Priority: P1)
 
-As a user with a supported local GPU configuration, I can choose whether notebook execution should use the GPU, require the GPU, or remain CPU-only, and agent-driven execution observes the same compute availability as interactive execution.
-
-**Why this priority**: Local accelerator use is a primary advantage over remote notebook services for the intended workflows.
-
-**Independent Test**: Launch a compatible notebook with GPU required, verify that interactive execution detects the local GPU, then verify the attached agent observes the same result.
-
-**Acceptance Scenarios**:
-
-1. **Given** automatic GPU selection, **When** a usable supported GPU is available, **Then** the notebook may use it; otherwise the notebook remains usable on CPU.
-2. **Given** GPU-required mode, **When** no usable GPU is available, **Then** launch fails with a clear capability explanation rather than silently falling back to CPU.
-3. **Given** CPU-only mode, **When** the notebook launches, **Then** GPU access is not granted to the session.
-4. **Given** an agent attached to a GPU-enabled session, **When** it checks compute capability, **Then** it observes the same GPU availability as interactive notebook execution.
+1. `gpu=auto` uses a supported usable GPU when available and otherwise remains usable on CPU.
+2. `gpu=on` fails clearly if a usable GPU is unavailable.
+3. `gpu=off` does not expose GPU access.
+4. Browser and MCP execution observe the same GPU availability/device identity.
 
 ---
 
-### User Story 5 - Keep Local Execution Contained (Priority: P1)
+### User Story 5 — Keep Local Execution Contained (Priority: P1)
 
-As a user, I can run a trusted public notebook with a constrained local execution boundary so that repository code and agent actions do not automatically gain unrelated access to my machine or remote source repository.
-
-**Why this priority**: Running notebook code and allowing an agent to edit and execute it are intentionally powerful operations; the feature must constrain the blast radius by default.
-
-**Independent Test**: Launch a trusted notebook and verify that it can access only the workspace and explicitly granted resources, cannot access unrelated host credentials or directories, and has no capability to mutate the remote GitHub repository.
+As a user, I can run a user-trusted notebook within a constrained local boundary that does not automatically expose unrelated host filesystem, credentials, local network services, Docker control, or GitHub mutation capability.
 
 **Acceptance Scenarios**:
 
-1. **Given** a normal writable launch, **When** the notebook or agent operates, **Then** the persistent workspace is writable but unrelated host resources remain unavailable unless explicitly granted.
-2. **Given** no explicit local data grant, **When** the notebook runs, **Then** the user's home directory, credentials, unrelated files, and local management interfaces are not implicitly exposed.
-3. **Given** a remote GitHub source, **When** notebook or agent activity occurs, **Then** the feature does not commit, push, create branches, or otherwise modify GitHub.
-4. **Given** malformed paths, unsupported sources, or cross-session attachment attempts, **When** they are submitted, **Then** they are rejected before they can widen the allowed execution scope.
-5. **Given** a user-controlled value containing command-like text, **When** it is processed by the launcher, **Then** it is treated as data rather than as executable host commands.
-6. **Given** the standard local isolation mode, **When** a repository is launched, **Then** the product presents it as defense-in-depth for user-trusted repositories and does not claim safe containment of arbitrary malicious code.
+1. Only explicit workspace/source/output/user-data mounts are available; host home, credentials, Docker socket, and unrelated paths are absent by default.
+2. Inbound published services are launcher-controlled and loopback-only.
+3. Outbound Internet access to globally routable destinations is enabled by default for packages, models, datasets, and APIs.
+4. Default egress denies loopback, host gateway, RFC1918/private/LAN, IPv6 ULA, link-local, cloud metadata, multicast, and other non-global local destinations, including when reached through DNS; only explicitly approved infrastructure such as the configured DNS resolver is exempted.
+5. The runtime does not add a host-gateway alias or equivalent bypass by default.
+6. Unsupported/malformed sources, traversal, cross-session access, permission escalation, and command-injection attempts are rejected.
+7. No Git commit/push/branch/GitHub write-credential surface exists.
+8. The standard sandbox is described as defense-in-depth for user-trusted repositories, not hostile-code containment.
 
 ---
 
-### User Story 6 - Attach Explicit Local Data Storage (Priority: P2)
+### User Story 6 — Attach Explicit Local Data Storage (Priority: P2)
 
-As a user, I can explicitly make one selected local directory available to the notebook as persistent data storage, similar to attaching external storage in a hosted notebook, without exposing my entire home directory.
-
-**Why this priority**: Persistent datasets and outputs are useful for real notebook work, but the core source-to-workspace-to-agent flow can operate without an additional host directory.
-
-**Independent Test**: Explicitly select a local folder, grant it read-only or read-write access, verify that the selected folder is accessible from the notebook, and verify that unrelated host directories remain inaccessible.
+As a user, I can explicitly grant one local directory as `ro` or `rw` persistent data without exposing my whole home or allowing path/symlink escapes.
 
 **Acceptance Scenarios**:
 
-1. **Given** no local folder has been selected, **When** a session launches, **Then** no additional user-data directory is exposed.
-2. **Given** a selected folder with read-only access, **When** the notebook uses it, **Then** files can be read but not modified through the session.
-3. **Given** a selected folder with read-write access, **When** the notebook uses it, **Then** files inside that folder may be created or changed according to normal filesystem permissions.
-4. **Given** a remote notebook launch reference, **When** it is opened, **Then** it cannot select or change the host folder on the user's behalf.
-5. **Given** a previously configured folder is no longer available, **When** the workspace reopens, **Then** the missing mount is reported clearly and unrelated host paths are not substituted automatically.
+1. No extra host data directory is mounted by default.
+2. Remote launch URLs cannot choose, replace, or broaden the host directory grant.
+3. At grant time the launcher resolves and records a canonical root and checks forbidden/whole-home rules after canonicalization.
+4. Host-side read/write/copy operations are anchored to the granted canonical root and use symlink/reparse-safe no-follow semantics; path components that would escape the grant are rejected.
+5. Save a Copy to `user_data` cannot escape through `..`, symlink, junction, reparse point, race-prone string-prefix checks, or path replacement.
+6. Missing/replaced grant roots fail clearly rather than substituting another path.
 
 ---
 
-### User Story 7 - Stop and Reopen Work Predictably (Priority: P2)
+### User Story 7 — Stop and Reopen Work Predictably (Priority: P2)
 
-As a user, I can see whether a launch is preparing, ready, failed, or stopped; stop disposable execution resources; and later reopen the persistent workspace.
+1. Launch/session status exposes high-level phase and actionable secret-safe failure information.
+2. Stop invalidates runtime credentials, MCP state, writable lease, and execution handles but preserves workspace/cache.
+3. Reopening a stopped workspace requires a fresh local launch authorization gesture and starts against the existing working copy.
+4. A workspace has at most one active runtime; repeated start requests reuse/direct to the existing session rather than create a second one.
 
-**Why this priority**: Clear lifecycle behavior makes repeated local use understandable and prevents the user from having to manage hidden background processes manually.
+## Edge Cases
 
-**Independent Test**: Start a launch, observe its status, stop it, verify that active execution and agent attachment end, then reopen the persistent workspace and verify the saved working copy remains.
+- Cross-site navigation/image/iframe/form attempts target `127.0.0.1` launcher URLs.
+- A one-time launch token is expired, replayed, altered, used with a different normalized request, or submitted from a non-loopback/non-same-origin context.
+- GitHub repository is renamed, transferred, deleted and recreated under the same namespace, or returns inconsistent metadata during resolution.
+- Browser code is running while an agent execution is queued and then cancelled/times out.
+- Browser and agent requests race at the transition from kernel idle to busy.
+- DNS resolves a public-looking hostname to a private/link-local/metadata address.
+- IPv4-mapped IPv6 or alternate address forms attempt to bypass egress filtering.
+- A user-data directory or destination contains symlinks/reparse points or is swapped between validation and open.
+- Browser focus switches to another notebook while MCP remains attached.
+- Workspace disk is full, kernel dies, GPU disappears, or output is unusually large/binary/multimodal.
 
-**Acceptance Scenarios**:
-
-1. **Given** a launch in progress, **When** the user checks status, **Then** the current high-level phase and any actionable failure reason are visible.
-2. **Given** an active session, **When** the user stops it, **Then** active execution and agent attachment are invalidated while persistent workspace contents remain.
-3. **Given** a stopped workspace, **When** the user reopens it, **Then** a new execution session starts against the existing working copy.
-4. **Given** a workspace already has an active notebook session, **When** the user attempts to start another session for that same workspace, **Then** the launcher does not create a second active session; it identifies the existing session and requires that session to be reused or stopped before a new one can start.
-
-### Edge Cases
-
-- The supplied source points to a directory, issue, pull request, raw non-notebook file, or another unsupported target.
-- The requested notebook or source revision no longer exists.
-- A source reference changes after it has been resolved for a launch.
-- The user cancels the trust prompt for a source not covered by an existing trust decision.
-- Repository-wide trust exists and a later repository revision is launched; the stored repository trust decision applies.
-- The user and agent operate on conflicting notebook versions; stale mutation/save attempts are rejected, while normal browser edits remain in the shared authoritative document.
-- A writable agent creates, changes, renames, or deletes non-notebook files inside the persistent workspace; those operations follow the same persistence and conflict rules as other workspace changes.
-- A generic workspace-file operation targets the active notebook; it is rejected or routed through the notebook-aware operation instead of bypassing notebook conflict semantics.
-- A second session-start request arrives while the workspace already has an active session; no second runtime is created for that workspace.
-- A second writable MCP agent attempts to attach while another writable agent is active; the additional writable attachment is rejected until the current writable agent disconnects.
-- A working notebook is renamed or moved within the allowed workspace; active-notebook metadata follows the supported move and reopen targets the new path.
-- A Save a Copy destination already exists or is outside the allowed destination scope.
-- The local workspace or output storage runs out of disk space; failed writes must not leave a partially replaced prior file.
-- An explicitly attached local data folder disappears or becomes unavailable between sessions.
-- A notebook or agent operation attempts to access files outside the allowed workspace and explicit data grants.
-- A long-running or non-terminating cell exceeds its allowed execution time or is cancelled.
-- The notebook kernel terminates unexpectedly during interactive or agent execution.
-- The agent disconnects during execution or attempts to reconnect after the notebook session has stopped.
-- Notebook output is unusually large, binary, or multimodal; agent-returned payloads stay bounded and audit logs exclude the full payload by default.
-- A required GPU becomes unavailable between launch and execution.
-
-## Requirements *(mandatory)*
+## Requirements
 
 ### Functional Requirements
 
-- **FR-001**: The system MUST accept a supported public GitHub notebook reference and open the exact requested notebook locally.
-- **FR-002**: The system MUST record the exact immutable source revision used for each fresh remote-source workspace.
-- **FR-003**: Before executing a source not covered by an existing local trust decision, the system MUST offer the user two persistent trust scopes: trust the exact resolved commit, or trust the repository for future revisions.
-- **FR-004**: Cancelling or declining the trust prompt MUST prevent repository-supplied notebook code and setup instructions from executing.
-- **FR-005**: Exact-commit trust MUST apply only to the approved immutable commit; repository-wide trust MUST apply to future revisions from the same repository until that local trust decision is changed or removed.
-- **FR-006**: A fresh remote-source launch MUST create a new persistent workspace by default rather than silently reuse a prior edited workspace.
-- **FR-007**: Each workspace MUST retain source provenance separately from the editable working copy.
-- **FR-008**: Notebook edits, saved cell outputs, workspace files, and generated artifacts MUST persist after the active execution session stops.
-- **FR-009**: Users MUST be able to reopen an existing workspace without resetting its working copy from the remote source.
-- **FR-010**: Users MUST be able to save a distinct copy of the current notebook within an allowed persistent destination.
-- **FR-011**: Save a Copy MUST preserve an existing destination unless overwrite is explicitly requested.
-- **FR-012**: The feature MUST NOT commit, push, create branches, or otherwise modify the remote GitHub repository.
-- **FR-013**: The feature MUST NOT require or inject GitHub write credentials for ordinary notebook launch, workspace use, or agent operation.
-- **FR-014**: Notebook dependencies declared by the source project MUST be usable without relying on unrelated packages installed in the user's host Python environment.
-- **FR-015**: Reopening or relaunching an unchanged source environment SHOULD reuse previously prepared reusable artifacts when available.
-- **FR-016**: The default agent capability profile MUST permit notebook-cell inspection, insertion, editing, deletion, and execution within the current workspace.
-- **FR-017**: A read-only agent profile MUST permit inspection but MUST reject code execution and all notebook or workspace mutation.
-- **FR-018**: Agent operations MUST use the same active notebook workspace and execution state visible to the user rather than creating an unrelated hidden notebook runtime.
-- **FR-019**: Whole-notebook agent execution MUST process code cells in notebook order and stop on the first execution error by default.
-- **FR-020**: Cell execution failures MUST identify the failing cell and provide actionable error context while leaving the session usable when the execution environment itself remains healthy.
-- **FR-021**: Long-running agent execution MUST provide a real timeout or cancellation path that interrupts/terminates the requested execution and returns a distinct timeout/cancelled outcome without deleting the persistent workspace.
-- **FR-022**: Stopping a notebook session MUST invalidate active agent attachment while preserving the persistent workspace.
-- **FR-023**: Users MUST be able to choose automatic GPU use, required GPU use, or CPU-only execution.
-- **FR-024**: Required GPU mode MUST fail clearly when a supported usable GPU is unavailable rather than silently switching to CPU.
-- **FR-025**: Interactive and agent-driven execution in the same session MUST observe the same compute capability and workspace state.
-- **FR-026**: Local execution MUST be isolated from unrelated host resources by default and MUST expose only the workspace and resources explicitly granted by the user.
-- **FR-027**: Host credentials, unrelated host directories, local management interfaces, and other notebook sessions MUST NOT be exposed by default.
-- **FR-028**: The standard isolation mode MUST be presented as defense-in-depth for user-trusted repositories, not as a guarantee for arbitrary adversarial code.
-- **FR-029**: The system MUST reject unsupported remote hosts, malformed notebook references, path traversal outside allowed scopes, and cross-session agent attachment attempts.
-- **FR-030**: User-controlled source, path, session, and permission values MUST be treated as data and MUST NOT become executable host command text.
-- **FR-031**: Outbound network access from the notebook session MUST be allowed by default for package, model, data, and API retrieval, while inbound exposure MUST remain local to the user's machine unless explicitly configured otherwise.
-- **FR-032**: No additional host data directory MUST be exposed by default.
-- **FR-033**: Users MAY explicitly grant one selected local directory to a workspace as read-only or read-write persistent data storage.
-- **FR-034**: A remote notebook reference MUST NOT be able to select, replace, or broaden the host data directory grant.
-- **FR-035**: The entire home directory MUST NOT be granted automatically merely for convenience.
-- **FR-036**: The system MUST provide a persistent output area for generated files and artifacts that is not removed when the execution session stops.
-- **FR-037**: The system MUST expose clear launch/session status and actionable, secret-safe failure information.
-- **FR-038**: Agent attachment and execution activity MUST produce bounded audit metadata sufficient to identify the workspace/session, operation, timing, and success or failure without copying complete notebook content or large/binary/multimodal output payloads into logs by default.
-- **FR-039**: Permission enforcement for writable and read-only agent profiles MUST occur at the launcher/agent-control boundary and MUST NOT rely only on agent instructions or prompt compliance.
-- **FR-040**: A read-only agent MUST NOT be able to promote itself to writable access without a new explicit local authorization decision.
-- **FR-041**: The launcher MUST NOT automatically delete persistent workspace data as part of this feature; stopping an execution session MUST NOT be treated as workspace deletion. A user-facing workspace-delete operation is outside the MVP scope.
-- **FR-042**: The active notebook MUST have one authoritative shared document state. Interactive browser edits MUST participate in that state, and stale agent mutations or stale independent full-document/file saves MUST be rejected rather than silently overwriting newer notebook state; conflicting stale writes MUST require refresh/retry.
-- **FR-043**: In the default writable profile, the agent MUST be permitted to create, read, modify, rename, and delete files anywhere inside the persistent workspace, subject to workspace conflict/persistence rules; this permission MUST NOT implicitly extend to host paths outside the workspace or explicitly granted local data, and generic file operations MUST NOT bypass notebook-aware conflict semantics for the active notebook.
-- **FR-044**: A workspace MUST have at most one active notebook session at a time; a request to start another session for an already-active workspace MUST reuse or direct the user to the existing session, or require it to stop before a replacement session is created.
-- **FR-045**: An active notebook session MUST permit at most one writable MCP agent attachment at a time; a second writable MCP agent MUST be rejected until the current writable agent disconnects or its attachment is invalidated.
-- **FR-046**: A supported rename or move of the active notebook within the workspace MUST update `active_notebook_path` atomically enough that subsequent status, agent attachment, stop, and reopen operations target the new path; if the active notebook disappears outside a supported move, the launcher MUST fail clearly rather than guess a replacement.
-- **FR-047**: Launcher-managed persistent writes and notebook save integration MUST fail safely on disk-full or comparable filesystem write errors so an unsuccessful replacement does not leave a partially written prior saved file.
-- **FR-048**: Agent-facing output retrieval MUST use a configurable bounded payload policy; oversized text MUST report truncation, binary/multimodal output MUST carry type/size metadata or a bounded preview/reference, and the full authoritative notebook output MUST remain available in the notebook/workspace rather than being copied into audit logs.
-- **FR-049**: The complete standard sandbox policy required by the project constitution MUST be applied before the notebook server accepts notebook/agent execution; mandatory controls include non-root execution where compatible, no new privileges, unnecessary capability removal, syscall filtering or equivalent controls, resource limits, minimal explicit mounts, and exclusion of host credentials/Docker socket/unrelated host paths.
+- **FR-001**: The system MUST accept a supported public GitHub notebook reference and open the exact requested notebook locally after required local authorization/trust gates.
+- **FR-002**: Every remote source MUST resolve to an immutable commit SHA and stable GitHub repository identity before execution authorization.
+- **FR-003**: Before executing a source not covered by trust, the system MUST offer exact-commit and repository-wide trust scopes.
+- **FR-004**: Denying/cancelling trust MUST prevent repository-supplied setup and notebook execution.
+- **FR-005**: Exact-commit trust MUST authorize only the approved stable repository ID + commit SHA.
+- **FR-006**: Repository-wide trust MUST be keyed by stable GitHub repository ID (with current owner/name as display metadata), follow the same repository object across rename/transfer, and MUST NOT authorize a different repository object recreated at the same namespace.
+- **FR-007**: A fresh remote launch MUST create a new persistent workspace by default.
+- **FR-008**: Source provenance MUST remain separate from the editable workspace.
+- **FR-009**: Notebook edits, outputs, workspace files, and artifacts MUST persist after session stop.
+- **FR-010**: Reopen MUST reuse the existing working copy rather than reset from GitHub.
+- **FR-011**: Save a Copy MUST create a distinct notebook at a validated persistent destination and preserve existing destinations unless overwrite is explicit.
+- **FR-012**: The feature MUST NOT commit, push, create branches, or otherwise modify GitHub.
+- **FR-013**: GitHub write credentials MUST NOT be required/injected for ordinary use.
+- **FR-014**: Source-declared dependencies MUST work without relying on unrelated host Python packages.
+- **FR-015**: Unchanged environment artifacts SHOULD be reused when available.
+- **FR-016**: Writable agent mode MUST support notebook inspection/mutation/execution plus ordinary workspace file operations inside the allowed workspace.
+- **FR-017**: Readonly agent mode MUST reject execution, cancellation, restart, and all notebook/workspace mutation while permitting inspection.
+- **FR-018**: Agent operations MUST use the same active notebook workspace/execution state visible to the user.
+- **FR-019**: Whole-notebook execution MUST preserve code-cell order and default stop-on-error.
+- **FR-020**: Execution failures MUST identify failing cell/context while preserving the session when healthy.
+- **FR-021**: Agent execution MUST provide real timeout/cancellation and distinct outcomes.
+- **FR-022**: Agent execution MUST be ownership-aware: queued cancellation MUST NOT interrupt the kernel, and kernel interrupt MUST occur only when the active Jupyter request is owned by the cancelling/timed-out agent operation.
+- **FR-023**: The execution broker MUST track enough Jupyter request/message identity and kernel busy state to distinguish agent-owned active work from browser-owned work.
+- **FR-024**: Session stop MUST invalidate agent attachment/execution handles while preserving workspace.
+- **FR-025**: Users MUST be able to select `gpu=auto|on|off` with clear required-GPU failure.
+- **FR-026**: Browser and agent execution in the same session MUST observe the same compute capability/workspace state.
+- **FR-027**: Local execution MUST expose only explicitly granted filesystem/resources by default.
+- **FR-028**: Host credentials, unrelated host directories, Docker socket, local management interfaces, and other sessions MUST NOT be exposed by default.
+- **FR-029**: The standard isolation mode MUST be described as defense-in-depth, not arbitrary malicious-code containment.
+- **FR-030**: Unsupported hosts/references, traversal, cross-session access, and command-injection attempts MUST be rejected.
+- **FR-031**: User-controlled values MUST be passed as data/structured arguments, not shell text.
+- **FR-032**: Public Internet egress to globally routable destinations MUST be allowed by default for package/model/data/API retrieval.
+- **FR-033**: Default egress MUST deny loopback, host gateway, private/LAN, link-local, metadata, multicast, reserved/non-global local ranges (IPv4 and IPv6), except explicitly approved infrastructure required by the runtime such as configured DNS resolver endpoints.
+- **FR-034**: Inbound service exposure MUST be launcher-controlled and loopback-only by default.
+- **FR-035**: No additional host data directory MUST be exposed by default.
+- **FR-036**: Users MAY grant one selected local directory as `ro|rw`; remote sources MUST NOT select/change it and whole-home grant MUST NOT be automatic.
+- **FR-037**: Host data grants MUST store/validate a canonical root; host-side operations MUST enforce symlink/reparse-safe containment with no-follow/dirfd-equivalent semantics rather than string-prefix validation alone.
+- **FR-038**: Save a Copy and other host-side operations under a user-data grant MUST reject any path that escapes the canonical root through traversal, symlink/junction/reparse point, or path substitution race.
+- **FR-039**: The system MUST provide persistent output storage that survives runtime stop.
+- **FR-040**: Launch/session status and failures MUST be clear and secret-safe.
+- **FR-041**: Agent audit metadata MUST be bounded and omit raw credentials, full notebook content, and full large/binary output payloads by default.
+- **FR-042**: Agent permission enforcement MUST occur at the launcher/MCP boundary; readonly cannot self-promote without explicit local authorization/new session policy.
+- **FR-043**: Persistent workspace data MUST NOT be automatically deleted by session stop; user-facing workspace deletion is out of MVP scope.
+- **FR-044**: The active notebook MUST have one authoritative shared document; normal browser edits participate in it and stale independent/agent writes are rejected.
+- **FR-045**: Generic file operations MUST NOT bypass notebook-aware semantics for the active notebook.
+- **FR-046**: A workspace MUST have at most one active notebook session.
+- **FR-047**: An active session MUST permit at most one writable MCP attachment.
+- **FR-048**: Supported active-notebook rename/move MUST update `active_notebook_path`; unsupported disappearance fails clearly.
+- **FR-049**: Persistent replacement writes MUST fail safely on disk-full/comparable errors without replacing the last good file.
+- **FR-050**: Agent-facing output retrieval MUST use configurable bounded payloads while preserving authoritative notebook output.
+- **FR-051**: The complete standard sandbox MUST be applied and verified before notebook/agent execution.
+- **FR-052**: `GET /open` MUST be non-executing: it may validate/resolve/render a local preview but MUST NOT initiate repository build/setup, runtime, kernel, or notebook code.
+- **FR-053**: Every fresh launch or stopped-workspace reopen MUST require a short-lived one-time local launch authorization gesture/token bound to the normalized request, regardless of whether source trust already exists.
+- **FR-054**: Launch authorization MUST be separate from source trust, resistant to cross-site drive-by invocation, not accepted from the original GET query, and protected by same-origin/local checks plus anti-framing behavior.
+- **FR-055**: MCP MUST remain bound to the launcher-designated `active_notebook_path`; browser tab/focus changes or opening another notebook MUST NOT silently retarget the agent.
 
-### Key Entities *(include if feature involves data)*
+### Key Entities
 
-- **Remote Notebook Source**: The public GitHub repository, requested reference, notebook path, and immutable source revision used to establish provenance.
-- **Trust Decision**: The user's local approval scope for executing a remote source, recorded either for one exact immutable commit or for the repository and its future revisions; cancelling leaves no trust grant.
-- **Workspace**: Persistent local state for one launched source, including provenance, editable files, notebook copies, outputs, and workspace preferences; writable mode treats the full workspace as mutable state and owns at most one active notebook session.
-- **Working Notebook**: The editable local notebook opened and saved by the user and agent; it is separate from immutable source provenance and is represented by one authoritative shared document plus an opaque current version used for stale-write detection.
-- **Output Artifact**: A persistent file produced by notebook execution, such as a model, table, image, checkpoint, report, or exported data file.
-- **Notebook Session**: The disposable active execution context for a workspace; exactly zero or one may be active for a workspace at a time, it permits at most one writable MCP agent attachment at a time, and it may be stopped and recreated without deleting workspace data.
-- **Agent Capability Profile**: The effective permission set for an attached agent, including the default writable profile with full workspace write access and the read-only inspection profile.
-- **Local Data Grant**: An optional explicit user-selected local directory and its read-only or read-write access mode.
-- **Agent Activity Record**: Sanitized metadata describing an agent attachment or execution operation without storing full notebook contents or large/binary output payloads by default.
+- **Remote Notebook Source**: current owner/name, stable GitHub repository ID/node ID, requested ref, normalized notebook path, resolved commit SHA.
+- **Launch Preview/Authorization**: normalized launch/reopen request plus short-lived signed one-time authorization token/request digest; it authorizes starting local compute but is not a source-trust grant.
+- **Trust Decision**: local exact-commit or repository-wide authorization keyed to stable repository identity.
+- **Workspace**: persistent provenance + mutable files/outputs/preferences with zero or one active session.
+- **Working Notebook**: launcher-designated active notebook represented by one authoritative collaborative document/version.
+- **Notebook Session**: disposable runtime with verified sandbox/network policy and zero or one writable MCP lease.
+- **Execution Operation**: agent execution record with queue state, operation ID, Jupyter request message ID when dispatched, deadline/cancel state, and ownership of active kernel work.
+- **Agent Capability Profile**: `write` or `readonly` policy.
+- **Local Data Grant**: user-selected original path + canonical root + `ro|rw` mode.
+- **Output Artifact / Output Envelope**: persistent full artifact/output vs bounded agent-facing representation.
+- **Agent Activity Record**: sanitized bounded metadata.
 
-## Success Criteria *(mandatory)*
+## Success Criteria
 
-### Measurable Outcomes
-
-- **SC-001**: A user can go from a supported public GitHub notebook reference to the exact local working notebook without manually cloning the repository or manually starting notebook infrastructure.
-- **SC-002**: In the persistence acceptance test, 100% of the tested notebook edit, saved cell output, and generated artifact remain after session stop and workspace reopen.
-- **SC-003**: Save a Copy produces a distinct persistent notebook containing the current saved notebook state while the original remote source remains unchanged.
-- **SC-004**: A representative source-declared dependency that is absent from the user's unrelated host environment is available in the launched notebook workspace.
-- **SC-005**: A writable MCP-capable agent can read, edit, execute, diagnose a controlled failure, repair it, and continue in the same notebook state observed by the user.
-- **SC-006**: In read-only mode, 100% of acceptance-test attempts to execute code or mutate notebook/workspace contents are denied while notebook inspection remains available.
-- **SC-007**: On a supported configured GPU host, interactive and agent-driven checks in the same session report the same GPU availability and device identity.
-- **SC-008**: In the security acceptance suite, unsupported sources, path traversal, cross-session attachment, prohibited host-resource access, and command-injection attempts are rejected or remain outside the granted execution scope.
-- **SC-009**: Stopping an active session invalidates agent access and releases disposable execution resources while preserving the tested workspace contents and reusable prepared artifacts.
-- **SC-010**: An explicitly granted local data folder exposes only the selected folder at the requested access level; unrelated host directories remain unavailable through the feature.
-- **SC-011**: For a source not covered by prior trust, execution does not begin until the user selects exact-commit trust or repository-wide trust; cancelling the prompt results in zero repository-supplied notebook or setup execution.
-- **SC-012**: A user can complete the primary source-to-open, edit/run, agent-assist, stop, and reopen workflow without performing Git write operations or managing notebook-server credentials manually.
-- **SC-013**: In concurrent/stale-write acceptance testing, 100% of deliberately stale agent mutations and stale independent notebook-save attempts are rejected rather than silently overwriting the newer authoritative notebook state, while normal shared browser edits remain persistent.
-- **SC-014**: In writable-mode acceptance testing, the agent can mutate representative notebook and non-notebook files inside the workspace while equivalent attempts against unrelated host paths are denied unless the user explicitly granted those paths; generic file operations cannot overwrite/delete the active notebook outside notebook-aware semantics.
-- **SC-015**: In workspace-lifecycle acceptance testing, repeated start requests cannot produce more than one active notebook session for the same workspace.
-- **SC-016**: In agent-attachment acceptance testing, a second writable MCP agent cannot attach while another writable MCP agent is active on the same notebook session.
-- **SC-017**: A deliberately non-terminating agent execution can be cancelled or reaches its configured timeout, returns a distinct cancelled/timeout result, and leaves the workspace available for continued use.
-- **SC-018**: Renaming or moving the active notebook through the supported path preserves the new active path across stop/reopen, and a simulated disk-full replacement failure preserves the previously saved file contents.
-- **SC-019**: Oversized text and representative binary/multimodal outputs produce bounded agent responses with explicit truncation/type metadata while the complete notebook output remains persisted and absent from audit payloads.
-- **SC-020**: Before the first notebook cell is allowed to execute, the standard sandbox acceptance assertions confirm the mandatory privilege, capability, syscall-filtering/equivalent, resource-limit, minimal-mount, credential-exclusion, and loopback-exposure controls are active.
+- **SC-001**: A supported public GitHub notebook can be opened locally without manual clone/server startup after explicit local launch authorization.
+- **SC-002**: GET-only/cross-site navigation to `/open` causes zero repository build/setup/runtime/kernel/notebook execution, including for an already repository-trusted source.
+- **SC-003**: 100% of fresh-launch and stopped-workspace-reopen acceptance cases require a valid one-time local launch authorization token; token replay/request substitution fails.
+- **SC-004**: Trust tests prove repository rename/transfer retains repository-wide trust via stable ID, while delete/recreate under the same namespace requires new trust.
+- **SC-005**: Persistence test retains notebook edit, saved output, ordinary workspace file, and generated artifact after stop/reopen.
+- **SC-006**: Source-declared dependency absent from host Python works inside the launched environment.
+- **SC-007**: Writable MCP agent can read/edit/execute/fail/repair/continue in the same notebook state as the browser.
+- **SC-008**: Readonly acceptance denies 100% of execution/mutation/escalation attempts while allowing inspection.
+- **SC-009**: Deliberately stale agent/independent notebook writes are rejected without overwriting newer authoritative state.
+- **SC-010**: A browser-running + queued-agent cancellation test proves cancelling/timing out the agent operation does not interrupt the browser-owned request.
+- **SC-011**: A running-agent cancellation test proves interrupt occurs only after the kernel busy parent/message ID is the agent-owned request and returns `cancelled`/`timeout` distinctly.
+- **SC-012**: On configured GPU host, browser and MCP report the same GPU availability/device identity.
+- **SC-013**: Security tests reject prohibited mounts, secret inheritance, Docker socket, traversal, cross-session access, command injection, and GitHub mutation surfaces.
+- **SC-014**: Public Internet connectivity works while direct and DNS-mediated attempts to reach host gateway/private/LAN/link-local/metadata/non-global destinations fail by default.
+- **SC-015**: Explicit user-data grant exposes only the selected canonical directory/mode; symlink/junction/reparse escape tests fail safely.
+- **SC-016**: Save a Copy to user-data cannot escape the grant by traversal, symlink, or path-swap race in the tested host path model.
+- **SC-017**: Stopping a session invalidates agent/runtime state while preserving workspace and reusable environment cache.
+- **SC-018**: Repeated starts cannot create more than one active session for a workspace.
+- **SC-019**: A second writable MCP agent cannot attach while the first writable lease is active.
+- **SC-020**: Active-notebook rename persists across stop/reopen; disk-full replacement failure preserves prior saved contents.
+- **SC-021**: Oversized/binary/multimodal output yields bounded agent responses while full authoritative output remains persisted and absent from audit payloads.
+- **SC-022**: Before first execution, sandbox assertions cover privileges/capabilities/syscall filtering/resources/mounts/secrets/network policy.
+- **SC-023**: Opening/focusing another JupyterLab notebook does not change MCP `active_notebook_path` target.
 
 ## Assumptions
 
-- The initial user is a single developer operating the launcher on their own machine.
-- WSL2/Linux is the first supported local execution environment; native Linux remains an intended compatible target.
-- Public GitHub repositories are sufficient for the MVP; private-repository authentication is out of scope.
-- Users decide which public repositories they trust enough to execute locally; public availability alone does not imply trust.
-- Exact-commit and repository-wide trust decisions are stored locally and can be changed or removed by the user.
-- The user's supported GPU environment, when used, is configured before GPU-specific acceptance testing.
-- Internet access is normally available for source retrieval and notebook-required packages, models, or data.
-- Persistent workspaces are stored locally and are not automatically deleted by this MVP; a user may remove them manually outside the launcher until a separately specified deletion feature exists.
-- Additional host data access is opt-in and limited to a user-selected directory.
-- The MVP guarantees at most one writable MCP attachment per active session. It does not promise simultaneous multi-client read-only collaboration; a backend may serialize read-only attachments while still supporting the read-only profile.
-- Multi-user hosting, public Internet exposure, distributed scheduling, cloud deployment, remote agents, and hardened arbitrary-hostile-code execution are outside the MVP scope.
+- Single developer/local machine; WSL2/Linux first, native Linux compatible where practical.
+- Public GitHub only for MVP; private authentication is out of scope.
+- GitHub stable repository numeric ID/node ID can be resolved before trust evaluation.
+- Users choose which public repositories to trust; public availability is not trust.
+- Repository-wide trust intentionally follows the same repository object across rename/transfer.
+- Public Internet access is normally available; local/private network service access is not required by the MVP and would need a separately explicit network grant/policy.
+- GPU environment, when used, is preconfigured by the user.
+- Workspaces persist locally and are not automatically deleted by this MVP.
+- Extra host data access is opt-in and limited to one canonical user-selected directory.
+- The MVP does not provide agent retargeting based on browser focus and does not guarantee simultaneous multiple readonly MCP clients.
+- Multi-user hosting, public Internet exposure, distributed scheduling, cloud deployment, remote agents, private repositories, hostile-code-grade isolation, and arbitrary local/LAN egress grants are outside MVP scope.

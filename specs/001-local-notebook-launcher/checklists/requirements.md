@@ -1,40 +1,56 @@
 # Specification Quality Checklist: Local Notebook Launcher
 
-**Purpose**: Validate specification completeness and quality before proceeding to planning/implementation
+**Purpose**: Validate specification/design readiness before implementation.
+
 **Created**: 2026-09-15
-**Feature**: [spec.md](../spec.md)
+
+**Feature**: `../spec.md`
 
 ## Content Quality
 
-- [x] No implementation details that belong only in the implementation plan leak into normative feature requirements
-- [x] Focused on user value, externally observable behavior, trust boundaries, and acceptance outcomes
-- [x] Written so implementation choices remain replaceable behind the defined behavior
-- [x] All mandatory sections completed
+- [x] User value and externally observable behavior remain clear.
+- [x] Backend/runtime implementation choices remain replaceable behind public contracts.
+- [x] No unresolved `[NEEDS CLARIFICATION]` markers remain.
+- [x] All mandatory specification sections are present.
 
 ## Requirement Completeness
 
-- [x] No [NEEDS CLARIFICATION] markers remain
-- [x] Requirements are testable and unambiguous
-- [x] Success criteria are measurable
-- [x] Success criteria remain implementation-neutral where possible
-- [x] All acceptance scenarios are defined
-- [x] Edge cases are identified, including cancellation, storage failure, active-notebook moves, and large/multimodal output
-- [x] Scope is clearly bounded
-- [x] Dependencies and assumptions identified
+- [x] Trust semantics distinguish exact-commit vs repository-wide scope.
+- [x] Repository-wide trust uses stable GitHub repository identity rather than mutable owner/name.
+- [x] GET `/open` is explicitly non-executing.
+- [x] Fresh launch and stopped-workspace reopen require one-time local launch authorization even when source trust exists.
+- [x] Launch authorization and source trust are separate concepts with separate tokens/decisions.
+- [x] Cross-site drive-by execution and clickjacking are covered by acceptance requirements.
+- [x] Persistent workspace/source/runtime separation is explicit.
+- [x] Active notebook target is launcher-designated and browser focus does not silently retarget MCP.
+- [x] Human/agent conflicts use one authoritative Jupyter document and reject stale independent writes.
+- [x] Agent execution cancellation is queue/request-ownership aware and cannot intentionally interrupt browser-owned work.
+- [x] Default Internet egress permits globally routable destinations while denying host/private/LAN/link-local/metadata/non-global destinations.
+- [x] DNS exceptions do not allow DNS-resolved private destination bypass.
+- [x] Standard sandbox remains mandatory before first execution.
+- [x] Local-data grants use canonical roots and symlink/reparse-safe host-side containment.
+- [x] Save a Copy cannot escape a local-data grant via traversal/symlink/path-swap race.
+- [x] GPU, storage-full, output-bounding, readonly, one-runtime, and one-writable-agent behavior remain covered.
+- [x] Workspace deletion, private repos, local/LAN egress grants, and notebook retargeting are clearly out of MVP scope.
+
+## Review Finding Closure
+
+- [x] CRITICAL: side-effecting GET / drive-by execution closed by preview-only GET + one-time local POST authorization.
+- [x] HIGH: cancellation interrupting browser work closed by Jupyter message-ID ownership broker and queued-cancel semantics.
+- [x] HIGH: unrestricted outbound vs host-resource isolation closed by public-Internet/non-global-deny egress policy.
+- [x] HIGH: symlink/junction/reparse local-data escape closed by canonical root + no-follow/dirfd semantics and tests.
+- [x] MEDIUM: mutable owner/name trust key closed by stable GitHub repository ID.
+- [x] Clarification: multiple Jupyter notebooks closed by fixed launcher-designated MCP target; focus does not retarget.
 
 ## Feature Readiness
 
-- [x] All functional requirements have clear acceptance coverage
-- [x] User scenarios cover primary flows
-- [x] Feature meets measurable outcomes defined in Success Criteria
-- [x] Constitution-mandated sandboxing and agent-cancellation behavior are represented before implementation begins
-- [x] Human/agent conflict behavior uses one authoritative notebook state and rejects stale independent writes
+- [x] Functional requirements are testable and unambiguous.
+- [x] Success criteria are measurable and map to implementation tests.
+- [x] Tasks explicitly cover all independent reviewer findings.
+- [x] Constitution-mandated sandboxing and agent cancellation remain pre-implementation gates.
+- [x] No known critical/high design blocker remains in the remediated artifacts.
 
 ## Notes
 
-- Validation re-run after the 2026-09-15 `$speckit-analyze` remediation pass.
-- GitHub is retained as the defined remote source for the MVP, and MCP is retained as the required agent-interoperability contract; both are feature-scope constraints rather than backend lock-in.
-- WSL2/Linux appears only as an initial supported-platform assumption. Runtime technology, container implementation, notebook-server implementation, MCP backend, and transport mechanics remain implementation-plan concerns.
-- The complete standard sandbox is required before first notebook/agent execution; it is not deferred to a later hardening increment.
-- The spec now explicitly covers real execution cancellation/timeout, authoritative browser↔agent notebook state, active-notebook file-operation guards, source-dependency isolation, disk-full safe-write behavior, notebook rename/move metadata, bounded large/binary/multimodal output, and the lack of a user-facing workspace-delete operation in the MVP.
-- No clarification blockers remain before implementation.
+- Validation re-run after PR #1 independent reviewer findings dated 2026-09-15.
+- Implementation remains intentionally deferred until re-review of this remediation.
