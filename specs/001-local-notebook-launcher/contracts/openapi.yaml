@@ -1,0 +1,99 @@
+openapi: 3.1.0
+info:
+  title: Notebook Launcher Local API
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:8080
+paths:
+  /open:
+    get:
+      summary: Start a notebook launch
+      description: Accept either url or the repo/ref/path tuple. Creates a local launch and redirects to its status page.
+      parameters:
+        - name: url
+          in: query
+          schema: { type: string, format: uri }
+        - name: repo
+          in: query
+          schema: { type: string, pattern: '^[^/]+/[^/]+$' }
+        - name: ref
+          in: query
+          schema: { type: string }
+        - name: path
+          in: query
+          schema: { type: string }
+        - name: gpu
+          in: query
+          schema:
+            type: string
+            enum: [auto, on, off]
+            default: auto
+      responses:
+        '303':
+          description: Launch accepted; redirect to status page
+        '400':
+          description: Invalid or unsafe launch request
+        '422':
+          description: Conflicting or incomplete source parameters
+  /launches/{launch_id}:
+    get:
+      summary: Human-facing launch status page
+      parameters:
+        - $ref: '#/components/parameters/LaunchId'
+      responses:
+        '200': { description: Status page or ready redirect response }
+        '404': { description: Unknown launch }
+  /api/launches/{launch_id}:
+    get:
+      summary: Get launch state
+      parameters:
+        - $ref: '#/components/parameters/LaunchId'
+      responses:
+        '200':
+          description: Launch state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LaunchStatus' }
+        '404': { description: Unknown launch }
+  /api/sessions/{session_id}:
+    delete:
+      summary: Stop a notebook session
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Session stopped }
+        '404': { description: Unknown session }
+  /health:
+    get:
+      summary: Launcher health
+      responses:
+        '200':
+          description: Service is running
+components:
+  parameters:
+    LaunchId:
+      name: launch_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    LaunchStatus:
+      type: object
+      required: [id, phase, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        phase:
+          type: string
+          enum: [received, resolving, acquiring, building, cache_hit, starting, ready, failed, stopping, stopped]
+        message: { type: [string, 'null'] }
+        error_code: { type: [string, 'null'] }
+        commit_sha: { type: [string, 'null'] }
+        notebook_path: { type: [string, 'null'] }
+        session_id: { type: [string, 'null'], format: uuid }
+        ready_url: { type: [string, 'null'], format: uri }
+        gpu_enabled: { type: [boolean, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
