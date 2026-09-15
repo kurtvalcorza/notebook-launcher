@@ -1,5 +1,14 @@
 # Data Model: Local Notebook Launcher
 
+## Persistence overview
+
+The launcher uses two persistence classes:
+
+- **Filesystem**: immutable source material, mutable workspace files, notebook copies, outputs, and owner-only runtime credential files.
+- **SQLite control state**: trust records, workspace/session lifecycle metadata, active-session ownership, writable-agent leases, document/file version metadata, and bounded audit events.
+
+SQLite rows never contain full notebook/cell contents or raw Jupyter credentials.
+
 ## LaunchRequest
 
 | Field | Type | Notes |
@@ -16,21 +25,48 @@
 
 | Field | Type | Notes |
 |---|---|---|
-| `owner` | string | GitHub owner |
-| `repository` | string | Repository name |
+| `owner` | string | Canonical GitHub owner |
+| `repository` | string | Canonical repository name |
 | `requested_ref` | string | User input ref |
 | `commit_sha` | string | Immutable resolved SHA |
 | `notebook_path` | string | Normalized repo-relative `.ipynb` |
 | `clone_url` | string | Constructed validated HTTPS GitHub URL |
 
-## TrustDecision
+Invariant: the normalized notebook path remains inside the repository root and ends in `.ipynb`.
+
+## TrustRecord
+
+Persistent local trust grant.
 
 | Field | Type | Notes |
 |---|---|---|
-| `source_key` | string | Repository/revision policy identity |
-| `status` | enum | `pending`, `trusted`, `denied` |
-| `decided_at` | datetime? | Local decision time |
-| `scope` | enum | e.g. exact revision or repository policy |
+| `id` | UUID | Trust record ID |
+| `owner` | string | Canonical GitHub owner |
+| `repository` | string | Canonical repository |
+| `scope` | enum | `exact_commit` or `repository` |
+| `commit_sha` | string? | Required for `exact_commit`; null for repository scope |
+| `created_at` | datetime | Grant time |
+| `revoked_at` | datetime? | Null while active |
+
+Constraints:
+
+- active exact-commit grants are unique by repository + commit SHA;
+- active repository-wide grant is unique by repository;
+- repository-wide grant covers future SHAs only for that same repository identity;
+- revoked records do not authorize execution.
+
+## TrustChallenge
+
+Ephemeral challenge for a pending launch.
+
+| Field | Type | Notes |
+|---|---|---|
+| `launch_id` | UUID | Pending launch |
+| `confirmation_nonce_hash` | string | Hash only; raw nonce rendered to local page |
+| `expires_at` | datetime | Short-lived |
+| `used_at` | datetime? | One-time use |
+
+The remote launch URL cannot provide a valid confirmation nonce.
 
 ## EnvironmentIdentity
 
@@ -43,33 +79,42 @@
 
 ## Workspace
 
-Persistent user state independent from runtime/container lifetime.
+Persistent user state independent from runtime lifetime.
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | UUID | Workspace identity |
-| `source` | ResolvedSource | Provenance of original source |
-| `root_path` | local path | Launcher-managed workspace root |
-| `work_path` | local path | Persistent editable copy |
+| `source_owner` | string | Provenance owner |
+| `source_repository` | string | Provenance repository |
+| `source_commit_sha` | string | Provenance SHA |
+| `source_notebook_path` | string | Original notebook path |
+| `root_path` | local path | Launcher-managed root |
+| `work_path` | local path | Persistent mutable workspace |
 | `outputs_path` | local path | Persistent generated artifacts |
-| `active_notebook_path` | string | Workspace-relative active notebook |
+| `active_notebook_path` | string | Workspace-relative current notebook |
 | `created_at` | datetime | Creation time |
 | `updated_at` | datetime | Last meaningful update |
-| `user_data_mount` | UserDataMount? | Explicit optional host-data mount policy |
+| `user_data_grant_id` | UUID? | Optional explicit mount grant |
 
-Invariant: deleting/stopping a runtime does not delete the workspace unless the user explicitly requests workspace deletion.
+Invariant: stopping/removing a runtime never deletes the workspace. A workspace owns zero or one active `NotebookSession`.
 
 ## SourceSnapshot
 
-Immutable source material/provenance associated with a workspace. It MUST NOT be modified by Jupyter/MCP operations. The working copy is materialized separately and SHOULD NOT carry a writable Git remote relationship.
+Immutable source material/provenance associated with a workspace. It MUST NOT be modified by browser/MCP operations. The mutable working tree is materialized separately and is not a GitHub publishing mechanism.
 
-## UserDataMount
+## UserDataGrant
 
 | Field | Type | Notes |
 |---|---|---|
-| `host_path` | local path | Explicitly user-selected; never derived from remote URL |
+| `id` | UUID | Grant ID |
+| `workspace_id` | UUID | Owning workspace |
+| `host_path` | local path | Explicitly user-selected by local management flow |
 | `container_path` | string | Stable path, default `/mnt/user-data` |
 | `mode` | enum | `ro` or `rw` |
+| `created_at` | datetime | Grant time |
+| `revoked_at` | datetime? | Null while active |
+
+Remote source URLs cannot create/change this grant.
 
 ## Launch
 
@@ -84,6 +129,8 @@ Immutable source material/provenance associated with a workspace. It MUST NOT be
 | `message` | string? | Safe progress/error text |
 | `error_code` | string? | Stable machine-readable category |
 | `session_id` | UUID? | Runtime session when started |
+| `created_at` | datetime | Creation time |
+| `updated_at` | datetime | Last transition |
 
 Phases: `received`, `resolving`, `awaiting_trust`, `acquiring`, `workspace_preparing`, `building`, `cache_hit`, `starting`, `mcp_preparing`, `ready`, `failed`, `stopping`, `stopped`.
 
@@ -95,34 +142,75 @@ Disposable runtime record.
 |---|---|---|
 | `id` | UUID | Session identity |
 | `workspace_id` | UUID | Persistent workspace |
-| `container_id` | string | Runtime container |
+| `runtime_id` | string | Container/runtime identifier |
 | `host_port` | integer | Loopback Jupyter port |
-| `jupyter_token` | secret | Private runtime state only |
 | `gpu_enabled` | boolean | Effective GPU allocation |
-| `agent_mode` | enum | `write` or `readonly` |
+| `agent_mode` | enum | `write` or `readonly` maximum policy |
 | `sandbox_profile` | string | MVP: `standard` |
-| `notebook_url` | string | Browser target |
-| `mcp_attachment` | McpAttachment? | Agent descriptor |
+| `notebook_url` | string | Browser target/redirect data |
+| `state` | enum | `starting`, `ready`, `stopping`, `stopped`, `failed` |
+| `started_at` | datetime | Start time |
+| `stopped_at` | datetime? | Terminal time |
+
+Database invariant: at most one session in an active state may reference the same workspace. Raw Jupyter token/URL credentials are held only in owner-only runtime-private state, not ordinary database/API records.
+
+## DocumentVersion
+
+Opaque optimistic-concurrency state for a mutable notebook/file.
+
+| Field | Type | Notes |
+|---|---|---|
+| `workspace_id` | UUID | Workspace |
+| `path` | string | Normalized workspace-relative path |
+| `kind` | enum | `notebook` or `file` |
+| `version` | string | Opaque version token returned to clients |
+| `content_hash` | string? | Internal integrity aid when appropriate |
+| `updated_at` | datetime | Last authoritative change observed |
+
+Rules:
+
+- reads return the current opaque version;
+- mutations of an existing object require `expected_version`;
+- a mismatched version is rejected as conflict before mutation;
+- notebook version derives from authoritative Jupyter collaborative/document state when active rather than an independent stale file view.
 
 ## McpAttachment
+
+Public non-secret descriptor for attaching to a ready session.
 
 | Field | Type | Notes |
 |---|---|---|
 | `session_id` | UUID | Owning runtime |
-| `available` | boolean | Whether selected backend satisfies profile |
+| `available` | boolean | Whether configured backend satisfies profile |
 | `status` | enum | `unavailable`, `available`, `attaching`, `attached`, `error`, `invalidated` |
 | `transport` | string | MVP: `stdio` |
 | `command` | string? | Local non-secret command |
 | `args` | list[string] | Non-secret args |
-| `backend` | string? | Informational backend/version |
+| `backend` | string? | Informational tested backend/version |
 | `agent_mode` | enum | `write` or `readonly` |
 | `capabilities` | list[string] | Semantic capabilities actually exposed |
+| `write_lease_available` | boolean? | Whether a writable attachment can currently acquire the lease |
 
 Raw Jupyter credentials are forbidden from this descriptor.
 
+## WritableAgentLease
+
+Transactional ownership record for writable MCP control.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | UUID | Lease ID |
+| `session_id` | UUID | Notebook session |
+| `client_label` | string? | Optional sanitized caller label |
+| `acquired_at` | datetime | Acquire time |
+| `heartbeat_at` | datetime? | Optional liveness update |
+| `released_at` | datetime? | Null while active |
+
+Invariant: at most one unreleased writable lease exists for an active session. Session stop invalidates/releases it. Read-only attachment records do not consume the writable lease.
+
 ## McpRuntimeState
 
-Private owner-only state used by the local bridge: session ID, loopback Jupyter URL, Jupyter token, workspace/notebook path, backend, permission profile. It expires with session stop.
+Owner-only ephemeral state used by `notebook-launcher mcp <session-id>`: session ID, loopback Jupyter URL, Jupyter token, workspace/notebook path, backend configuration, effective permission profile, and lease ID when writable. It expires with session stop.
 
 ## NotebookCopyRequest
 
@@ -130,8 +218,8 @@ Private owner-only state used by the local bridge: session ID, loopback Jupyter 
 |---|---|---|
 | `source_path` | string | Workspace-relative `.ipynb` |
 | `destination_scope` | enum | `workspace` or `user_data` |
-| `destination_path` | string | Validated relative destination path |
-| `include_outputs` | boolean | Preserve current outputs when true |
+| `destination_path` | string | Validated relative destination |
+| `include_outputs` | boolean | Preserve current saved outputs when true |
 | `overwrite` | boolean | Default false |
 
 ## AgentExecutionEvent
@@ -140,18 +228,30 @@ Private owner-only state used by the local bridge: session ID, loopback Jupyter 
 |---|---|---|
 | `id` | UUID | Event identity |
 | `session_id` | UUID | Notebook session |
+| `lease_id` | UUID? | Writable lease when applicable |
 | `operation` | string | Semantic operation |
-| `target` | string? | Cell ID/index etc. |
+| `target` | string? | Bounded cell/path identifier |
 | `started_at` | datetime | Start |
 | `duration_ms` | integer? | Duration |
-| `outcome` | enum? | success/failure/timeout/cancelled |
+| `outcome` | enum? | `success`, `failure`, `conflict`, `timeout`, `cancelled` |
 | `error_type` | string? | Sanitized category |
 
 Full cell source/output is not logged by default.
 
-## Cache vs Persistence
+## Lifecycle invariants
 
-- **Environment cache**: reusable image/build artifacts; may be deleted independently.
+1. A fresh remote launch creates a new workspace after trust approval.
+2. A workspace has zero or one active notebook session.
+3. An active session has zero or one writable agent lease.
+4. Browser and MCP use the same authoritative notebook document/kernel.
+5. A stale notebook/file mutation is rejected rather than overwriting newer state.
+6. Runtime stop invalidates credentials and writable lease but preserves workspace and environment cache.
+7. Trust revocation affects future launch authorization; it does not silently terminate an already-running trusted session.
+
+## Cache vs persistence
+
+- **Environment cache**: reusable image/build artifacts; independently removable.
 - **Source cache/snapshot**: immutable provenance material.
 - **Workspace**: persistent user edits/outputs; survives runtime stop.
-- **Runtime state**: ephemeral credentials/process metadata; invalidated on session stop.
+- **Control database**: durable local metadata, trust, versions, leases, audit.
+- **Runtime private state**: ephemeral credentials/process metadata; invalidated on stop.

@@ -2,231 +2,268 @@
 
 **Branch**: `001-local-notebook-launcher` | **Date**: 2026-09-15 | **Spec**: `specs/001-local-notebook-launcher/spec.md`
 
+**Input**: Feature specification from `specs/001-local-notebook-launcher/spec.md`
+
+**Note**: Generated/reconciled by `$speckit-plan` after the 2026-09-15 clarification pass.
+
 ## Summary
 
-Build a WSL2/Linux-first local launcher that turns a user-trusted public GitHub notebook into a persistent editable local workspace and a disposable sandboxed Jupyter runtime. Resolve Git refs to immutable SHAs, use repo2docker for reproducible environments, optionally expose a local NVIDIA GPU, and attach MCP-capable agents to the same Jupyter notebook/kernel. The default agent profile is writable; a true inspection-only `readonly` profile is also required.
+Build a WSL2/Linux-first local launcher that opens a user-trusted public GitHub notebook as a persistent editable local workspace backed by a disposable sandboxed Jupyter runtime. Resolve mutable Git refs to immutable SHAs, prepare the repository environment reproducibly, optionally expose a local NVIDIA GPU, and let an MCP-capable agent inspect, edit, execute, diagnose, and repair the same notebook/kernel the user sees.
 
-The product behaves like a local Colab-style workflow: GitHub is immutable source input; the user works on a local persistent copy; Jupyter autosave/edits/outputs survive runtime shutdown; Save a Copy duplicates the working notebook; optional explicitly selected local storage can be mounted like external drive storage. The launcher never commits, pushes, branches, or writes back to GitHub.
+The product follows a local Colab-like model: GitHub is immutable source input; work happens in a persistent local copy; stopping compute does not delete notebook edits or artifacts; Save a Copy remains local; and an explicitly selected local data directory may be attached. The launcher never commits, pushes, creates branches, or modifies GitHub.
+
+The clarified concurrency model is strict and local: trust may be granted per exact commit or per repository; a workspace has at most one active notebook session; a session has at most one writable MCP agent attachment; writable agents may modify the entire workspace; and stale human/agent mutations are rejected by optimistic document/file version checks rather than resolved by last-write-wins.
 
 ## Technical Context
 
 **Language/Version**: Python 3.12+
 
-**Primary Dependencies**: FastAPI, Uvicorn, Pydantic; Git, Docker Engine, repo2docker; JupyterLab inside generated images; pluggable Jupyter-capable MCP backend
+**Primary Dependencies**: FastAPI, Uvicorn, Pydantic; Python `sqlite3`; Git; Docker Engine; repo2docker; JupyterLab with Jupyter collaboration support; initial MCP adapter target: Datalayer `jupyter-mcp-server` 2.x behind the launcher semantic capability contract
 
-**Storage**: Launcher-managed local workspace root; immutable source cache/snapshot; persistent working copies and outputs; Docker image cache; owner-only private runtime/MCP state
+**Storage**: Launcher-managed filesystem for immutable source material, persistent workspace files, outputs, and runtime-private files; local SQLite database for trust records, workspace/session metadata, active-session ownership, writable-agent leases, document/file version metadata, and bounded audit events; Docker image cache for prepared environments
 
-**Testing**: pytest + contract/integration tests; Docker-backed sandbox tests; MCP capability tests; workspace persistence/save-copy tests; manual WSL2/NVIDIA smoke test
+**Testing**: pytest, pytest-asyncio/httpx, contract tests, Docker-backed integration tests, Jupyter/MCP conformance tests, concurrent-edit/version-conflict tests, persistence/reopen tests, sandbox-negative tests, and manual/integration WSL2 NVIDIA GPU validation
 
-**Target Platform**: WSL2/Linux-first, native Linux-compatible where practical
+**Target Platform**: Windows 11 + WSL2 Ubuntu first; native Linux-compatible where practical
 
-**Constraints**: Loopback-only services by default; single-user; user-trusted public GitHub only; no GitHub mutation; outbound sandbox network allowed; inbound blocked except launcher-published loopback services
+**Project Type**: Local web service + CLI + MCP bridge
+
+**Performance Goals**: Local status/control operations remain responsive while builds and notebook execution run asynchronously; cached immutable environments bypass rebuild; attaching an agent to a ready session does not rebuild or restart the runtime
+
+**Constraints**: Loopback-only by default; single local user; public GitHub sources only; user trust required; no GitHub mutation; standard sandbox mandatory; outbound notebook network allowed by default; inbound exposure limited to launcher-controlled loopback services; one active session per workspace; one active writable agent lease per session
+
+**Scale/Scope**: One local user, one Docker daemon, a small number of persistent workspaces, zero or one active session per workspace, one writable MCP agent per active session, optional concurrent read-only agent attachments, no distributed scheduling
 
 ## Constitution Check
 
-- **Local-first and safe**: PASS — WSL2/Linux-first, loopback listeners, explicit trust confirmation, user-trusted source model.
-- **Reproducibility**: PASS — immutable source SHA and environment identity recorded.
-- **Complete local agent POC**: PASS — MCP edit/execute path is P1.
-- **Sandboxing**: PASS — disposable runtime with minimal mounts, restricted privileges/resources, and no host credentials/Docker socket.
-- **Agent trust boundary**: PASS — MCP uses same workspace/kernel/sandbox/GPU policy.
-- **Agent editing**: PASS — writable default plus enforced readonly inspection profile.
+*GATE: Must pass before Phase 0 research. Re-checked after Phase 1 design.*
+
+- **I. Local-First and Safe by Default — PASS**: WSL2/Linux-first, loopback-only listeners, explicit source trust, validated inputs, no automatic host-data access.
+- **II. Reproducible Launches — PASS**: mutable refs resolve to immutable SHAs; source/environment identity is recorded; reusable environment artifacts are cached independently of mutable workspaces.
+- **III. Complete Local Agent-Operable POC — PASS**: GitHub → workspace → Jupyter → MCP agent execution/edit/repair remains P1; BinderHub/JupyterHub and multi-user infrastructure remain deferred.
+- **IV. Sandboxed Execution and Explicit Resource Access — PASS**: standard sandbox, minimal mounts, no Docker socket/host credentials, explicit GPU and user-data grants.
+- **V. Observable and Testable Launch Pipeline — PASS**: phase-level status and automated negative/integration tests are designed into each subsystem.
+- **VI. Agent Control Shares Notebook Trust Boundary — PASS**: browser and MCP use the same workspace, Jupyter server/kernel, GPU scope, filesystem, sandbox, and compute limits.
+- **VII. Agent Editing Explicitly Governed — PASS**: writable is default; readonly blocks execution/mutation; write escalation requires explicit authorization; a single writable-agent lease prevents competing writable controllers.
+
+No constitution exception is required.
 
 ## Architecture
 
 ```text
-GitHub notebook @ ref
-        |
-        v
-Source resolver -> immutable commit SHA
-        |
-        +-----------------------+
-        |                       |
-        v                       v
-immutable source/cache      Environment builder
-        |                  repo2docker -> image
-        v                       |
-Workspace manager               |
-  source/ (immutable)           |
-  work/   (persistent) <--------+
-  outputs/ (persistent)
-  optional user-data mount
-        |
-        v
-Standard sandbox runtime (disposable)
-  JupyterLab + kernel
-  optional NVIDIA GPU
-        |
-        +-------------------+
-        |                   |
-        v                   v
-     Browser             MCP adapter
-                            |
-                            v
-                Codex / Claude / Gemini / other
+                          Local control plane
+                    +---------------------------+
+                    | FastAPI / CLI / SQLite    |
+                    | trust, state, leases,     |
+                    | versions, audit           |
+                    +-------------+-------------+
+                                  |
+GitHub notebook @ ref             |
+        |                         |
+        v                         v
+Source resolver ----------> Workspace manager
+  ref -> immutable SHA       source/ immutable
+        |                    work/   persistent
+        v                    outputs/ persistent
+Environment builder               |
+repo2docker -> cached image       |
+        |                         |
+        +------------+------------+
+                     v
+             Standard sandbox runtime
+             JupyterLab + collaboration
+             active kernel + optional GPU
+                     |
+             +-------+--------+
+             |                |
+             v                v
+          Browser      MCP policy adapter
+                          |
+                          v
+              Datalayer Jupyter MCP backend
+                  (initial implementation)
+                          |
+                          v
+              Codex / Claude / Gemini / other
 ```
 
-### Filesystem model
+Critical invariant:
 
-Conceptual launcher storage:
+```text
+Browser notebook state === MCP notebook state === same workspace + same Jupyter document/kernel
+```
+
+### Control-plane state
+
+Use a small SQLite database rather than scattered mutable JSON for metadata that needs atomicity. SQLite owns trust records, workspace/session lifecycle state, the one-active-session constraint, writable-agent leases, document/file version tokens, and bounded audit records. Notebook contents and generated artifacts remain ordinary files in the workspace.
+
+The database is local-only and contains no raw notebook contents or Jupyter tokens. Runtime credentials remain owner-only ephemeral state and are invalidated when the session stops.
+
+### Trust model
+
+Before repository-supplied build/runtime code executes, a source not covered by prior trust enters `awaiting_trust`. The local prompt shows repository identity, resolved SHA, and notebook path and offers exactly two positive scopes:
+
+- **exact commit** — trust only that immutable SHA;
+- **repository** — trust future revisions from that same repository until revoked.
+
+Cancel/deny executes nothing from the repository. Trust confirmation uses a launch-scoped one-time nonce rendered only by the local trust page; remote launch URLs cannot supply or pre-approve trust. Trust records can be listed/revoked through local management commands.
+
+### Filesystem and persistence model
 
 ```text
 ~/.notebook-launcher/
-├── sources/<source-id>/          # immutable source material/cache
+├── state.db
+├── sources/<source-id>/             # immutable/cached source material
 ├── workspaces/<workspace-id>/
-│   ├── metadata.json             # provenance + policy, no secrets
-│   ├── work/                     # persistent editable working copy
-│   └── outputs/                  # persistent generated artifacts
-└── runtime/<session-id>/         # private ephemeral state/credentials
+│   ├── work/                        # persistent writable workspace
+│   └── outputs/                     # persistent generated artifacts
+└── runtime/<session-id>/            # owner-only ephemeral credentials/state
 ```
 
-Runtime mounts:
+Runtime view:
 
 ```text
-/source        read-only immutable source snapshot (optional diagnostic access)
-/workspace     persistent writable working copy
-/outputs       persistent workspace outputs
-/mnt/user-data optional explicit user-selected mount (ro or rw)
+/source          read-only source snapshot when exposed
+/workspace       persistent writable working tree
+/outputs         persistent generated artifacts
+/mnt/user-data   optional explicit local grant (ro or rw)
 ```
 
-The working copy SHOULD be materialized without a writable `.git` remote relationship. The launcher does not expose GitHub credentials or Git mutation operations.
+A fresh remote-source launch creates a fresh workspace. Reopening by workspace ID reuses the existing mutable files and does not reset from GitHub. Environment-image reuse is independent of workspace reuse.
 
-### Workspace lifecycle
+The working copy is materialized without a writable GitHub remote/credential relationship. GitHub write operations are outside this feature.
 
-```text
-source launch
- -> resolve SHA
- -> trust confirmation if needed
- -> create workspace
- -> copy/materialize editable work tree
- -> start disposable runtime
- -> autosave/edit/execute
- -> stop runtime (workspace survives)
- -> reopen workspace -> new runtime against same work tree
-```
+### Workspace/session ownership
 
-A new source launch creates a fresh workspace by default. Reuse of environment images is independent of workspace reuse.
+SQLite enforces at most one active notebook session per workspace. A request to reopen an already-active workspace returns/directs the user to that session rather than creating a second runtime. On launcher restart, state reconciliation checks recorded active sessions against the actual runtime and clears stale ownership before permitting replacement startup.
+
+### Human/agent conflict handling
+
+Notebook and mutable workspace reads expose an opaque version token derived from the authoritative current document/file state. Every agent mutation must supply the version it was based on. If the authoritative version changed, the mutation is rejected as `conflict` and the agent must refresh/retry.
+
+For notebook cells, the authoritative state is the shared Jupyter document when collaboration support is active. The initial MCP backend must pass a bidirectional browser↔agent persistence test; upstream behavior that silently loses either side's edits is a backend-conformance failure, never a reason to fall back to last-write-wins.
+
+The adapter may use Jupyter collaboration/YDoc metadata internally, but the public contract exposes only an opaque `document_version`. Non-notebook file mutations use analogous opaque `file_version` preconditions.
+
+### Agent profiles and writable lease
+
+`write` (default) may inspect/execute/mutate notebook cells and create/read/modify/rename/delete files anywhere inside `/workspace`, plus access explicit user-data grants according to their mount mode. It cannot implicitly widen access beyond the sandbox.
+
+`readonly` may inspect notebook/cell/output state only. Code execution, kernel restart, notebook mutation, workspace mutation, and file mutation are rejected at the launcher/MCP policy boundary.
+
+An active session may have at most one writable MCP lease. A second writable attachment fails clearly until the current writable client disconnects or the lease is invalidated. Read-only attachments are not serialized by this rule but remain session-scoped and non-mutating.
+
+### MCP backend strategy
+
+The initial adapter targets Datalayer `jupyter-mcp-server` 2.x because it can connect to an existing Jupyter server and exposes notebook/cell operations, execution, outputs, and kernel control. The launcher does not expose Datalayer-specific tool names as its public contract.
+
+The exact patch version is pinned only after the conformance suite passes against the launcher Jupyter/Jupyter-collaboration versions. The conformance gate includes bidirectional edit persistence because upstream real-time-collaboration regressions have existed. If a candidate backend/version cannot satisfy the semantic contract, it is rejected or adapted; launcher semantics are not weakened.
 
 ### Save a Copy
 
-Save a Copy duplicates a selected notebook from the current workspace to a validated destination:
+Save a Copy snapshots the current saved notebook to a validated destination inside the workspace or an explicitly granted writable user-data directory. Existing destinations are preserved unless overwrite is explicit. The operation never modifies source provenance or GitHub.
 
-- another path inside the workspace; or
-- an explicitly configured user-data mount.
+### Optional local data grant
 
-The copy may preserve current notebook outputs. It never commits/pushes/branches or alters the immutable source snapshot.
+Host paths are never accepted from a remote GitHub launch URL. The MVP grants/revokes a local host directory through local CLI/management flow, with explicit `ro`/`rw` mode; the runtime receives only the selected directory at the stable user-data mount path. Whole-home mounting is prohibited by default.
 
-### Sandbox baseline
+### Standard sandbox and network policy
 
-The `standard` sandbox targets:
+The standard sandbox targets non-root execution where compatible, `no-new-privileges`, dropped unnecessary capabilities, seccomp/equivalent syscall filtering, CPU/memory/PID limits, minimal explicit mounts, no Docker socket, no SSH/cloud/GitHub credentials, and loopback-only published services. Outbound network remains enabled for packages, models, datasets, and APIs. The standard sandbox is defense-in-depth for trusted repositories, not hostile-code containment.
 
-- non-root notebook user where compatible with repo2docker image;
-- no privileged mode;
-- `no-new-privileges`;
-- drop unnecessary Linux capabilities (target `ALL` unless a documented runtime need exists);
-- Docker/default seccomp or equivalent runtime syscall filtering;
-- CPU, memory, and PID limits configurable with safe defaults;
-- only explicit workspace/output/user-data mounts;
-- no Docker socket, SSH keys, cloud/GitHub credentials, or whole-home mounts;
-- outbound network permitted by default;
-- inbound connectivity blocked except Jupyter/launcher-controlled ports published to `127.0.0.1`.
+### GPU policy
 
-Exact compatible flags are validated during implementation; any relaxation requires explicit documentation and tests.
-
-### Trust decision
-
-Because `/open` is reachable through a browser, a new remote source must not silently proceed to code/environment execution. First-time/untrusted source launches enter a confirmation state showing repository, resolved SHA, and notebook path. A local trust record may suppress repeated prompts according to configured policy. Trust does not make sandboxing optional.
-
-### Agent profiles
-
-`write` (default): inspect notebook/cells/outputs, mutate notebook cells, execute cells/notebook/diagnostics, restart kernel.
-
-`readonly`: inspect notebook/cells/outputs only. Execution and mutation are rejected at the launcher/MCP adapter boundary. This is intentionally stricter than “execute but don't edit,” because arbitrary code execution can mutate workspace state.
+`gpu=auto` uses a usable NVIDIA GPU when available and otherwise runs CPU-only. `gpu=on` requires GPU support and fails before readiness if unavailable. `gpu=off` never grants GPU access. Browser and MCP probes must observe the same device scope.
 
 ### Execution semantics
 
-- Same Jupyter kernel for browser and MCP.
-- Single-cell and whole-notebook execution use Jupyter kernel APIs, not conversion to a separate Python script.
-- Whole-notebook execution preserves notebook order and defaults to stop-on-error.
-- Cell outputs/tracebacks remain visible through Jupyter/MCP and are persisted when the working notebook is saved.
-- Timeouts/cancellation distinguish kernel exception, timeout, cancellation, and MCP transport failure.
-
-### Network policy
-
-Outbound network is allowed in the POC for packages, model weights, datasets, and APIs. No additional inbound sandbox port is exposed unless explicitly designed; Jupyter is published only on loopback. Stronger egress policy is deferred.
+Single-cell and whole-notebook execution use the active Jupyter kernel. Whole-notebook execution preserves cell order, defaults to stop-on-error, and never silently converts the notebook into an unrelated script/runtime. Kernel exceptions, timeout, cancellation, kernel death, and MCP transport failure remain distinguishable.
 
 ## Project Structure
 
+### Documentation (this feature)
+
 ```text
-src/notebook_launcher/
-├── app.py
-├── cli.py
-├── config.py
-├── models.py
-├── source.py
-├── trust.py
-├── repository.py
-├── workspace.py
-├── environment.py
-├── sandbox.py
-├── runtime.py
-├── mcp.py
-├── audit.py
-├── orchestration.py
-└── errors.py
-
-tests/
-├── unit/
-├── contract/
-├── integration/
-└── fixtures/
-
 specs/001-local-notebook-launcher/
-├── spec.md
 ├── plan.md
 ├── research.md
 ├── data-model.md
 ├── quickstart.md
 ├── contracts/
 │   ├── openapi.yaml
+│   ├── cli.md
 │   ├── mcp-capabilities.md
 │   └── workspace-lifecycle.md
-└── tasks.md
+└── tasks.md                  # regenerated later by $speckit-tasks
 ```
+
+### Source Code (repository root)
+
+```text
+src/notebook_launcher/
+├── __init__.py
+├── app.py                    # loopback web launcher/status/trust routes
+├── cli.py                    # serve, mcp, trust and workspace management
+├── config.py                 # local paths, limits, backend/runtime options
+├── models.py                 # request/state/API models
+├── source.py                 # GitHub parsing, validation, ref resolution
+├── trust.py                  # exact-commit/repository trust policy
+├── state.py                  # SQLite schema/repository + transactions
+├── repository.py             # source acquisition/cache
+├── workspace.py              # create/reopen/copy/mount metadata
+├── versions.py               # opaque notebook/file version preconditions
+├── environment.py            # repo2docker image identity/build/cache
+├── sandbox.py                # standard sandbox policy/argv
+├── runtime.py                # Jupyter/container/GPU lifecycle
+├── mcp.py                    # semantic MCP policy adapter/backend bridge
+├── leases.py                 # session ownership + writable-agent leases
+├── audit.py                  # sanitized bounded events
+├── orchestration.py          # launch state machine/reconciliation
+└── errors.py                 # typed user-safe failures
+
+tests/
+├── unit/
+├── contract/
+├── integration/
+└── fixtures/
+```
+
+**Structure Decision**: One Python package keeps the POC local and small. Source resolution, persistent state, workspace management, sandbox/runtime, versioning, and MCP policy are distinct modules so later BinderHub/JupyterHub, strict sandbox, or alternate MCP backends can replace one subsystem without changing the public launch/agent contracts.
 
 ## Implementation Phases
 
-### Phase 0 — Host and backend diagnostics
+### Phase 0 — Host/backend diagnostics
 
-Verify Git, Docker, repo2docker, optional NVIDIA container capability, and MCP backend availability.
+Validate Git, Docker, repo2docker, SQLite state directory, optional NVIDIA container capability, and the configured MCP backend independently. Record exact tested package/runtime versions.
 
-### Phase 1 — Source resolution and trust
+### Phase 1 — Source resolution and trust control
 
-Parse GitHub source, resolve SHA, validate notebook path, and implement explicit first-time trust confirmation before remote code/environment execution.
+Implement strict GitHub parsing/ref resolution, exact-commit/repository trust records, one-time confirmation nonce, deny/cancel behavior, and trust list/revoke management.
 
-### Phase 2 — Persistent workspace
+### Phase 2 — Durable control state and workspace lifecycle
 
-Create immutable source provenance plus persistent editable work/output directories. Implement reopen and Save a Copy. Ensure runtime teardown never deletes workspace by default.
+Create SQLite schema/migrations, source provenance, fresh/reopen workspace behavior, outputs, Save a Copy, explicit user-data grants, crash/stale-session reconciliation, and one-active-session-per-workspace enforcement.
 
-### Phase 3 — Reproducible environment and standard sandbox
+### Phase 3 — Reproducible environment and sandbox runtime
 
-Build/cache image through repo2docker and start it with baseline sandbox restrictions, explicit mounts, outbound-only network policy, and optional GPU.
+Build/cache with repo2docker, start authenticated Jupyter/Jupyter collaboration in the standard sandbox, apply resource/network/mount restrictions, and implement GPU modes.
 
-### Phase 4 — Jupyter runtime
+### Phase 4 — MCP policy, versions, and writable lease
 
-Start authenticated Jupyter on a loopback-published port against the workspace, probe server/kernel readiness, and open the requested working notebook.
+Integrate the initial Datalayer adapter behind semantic capabilities. Enforce writable/readonly profiles, opaque document/file versions, conflict rejection, full-workspace writable operations, one writable-agent lease, timeouts/cancellation, and sanitized audit events.
 
-### Phase 5 — MCP agent control
+### Phase 5 — Local UX/status/management
 
-Attach selected MCP backend to the same Jupyter runtime. Implement writable default capability set and enforced readonly inspection set.
+Complete launch/status/trust pages, ready redirects, CLI management commands, clear conflict/lease errors, stop/reopen behavior, and secret-safe diagnostics.
 
-### Phase 6 — Persistence/mount/status/cleanup
+### Phase 6 — End-to-end and conformance acceptance
 
-Add optional explicit user-data mount, status APIs, runtime stop/reopen, MCP invalidation, and artifact persistence verification.
+Prove GitHub → trust → workspace → sandbox/Jupyter → optional GPU → writable MCP edit/execute/file operations → controlled conflict/failure/repair → stop → reopen. Verify no GitHub mutation, no prohibited mounts, no second active workspace runtime, no second writable-agent lease, and no silent human/agent edit loss.
 
-### Phase 7 — End-to-end acceptance
+## Post-Design Constitution Re-check
 
-Prove GitHub -> trust -> workspace -> sandbox/Jupyter -> GPU optional -> MCP edit/execute/repair -> stop -> workspace reopen.
+Phase 1 design preserves every pre-research gate. SQLite adds no service dependency and is used only where atomic local metadata is required; filesystem notebook data remains transparent. The initial MCP backend remains replaceable, and its known collaboration risks are converted into explicit conformance tests rather than accepted as product behavior. No constitution exception or Complexity Tracking entry is required.
 
 ## Complexity Tracking
 
-Persistent workspace and MCP are required by the desired Colab-like local UX and agent-operable MVP. They remain separated from runtime orchestration so future BinderHub/JupyterHub, alternate sandbox, and alternate MCP backends can replace implementation details without changing user-facing semantics.
+No constitution violations require justification.

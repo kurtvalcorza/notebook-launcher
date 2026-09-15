@@ -2,21 +2,41 @@
 
 ## Decision 1: Prove the local path without BinderHub first
 
-Use repo2docker + local Docker + JupyterLab for the POC; keep BinderHub/JupyterHub as later runtime backends. This proves source resolution, reproducible environment creation, sandboxing, GPU passthrough, persistent workspace semantics, and MCP agent control without Kubernetes overhead.
+**Decision**: Use local Docker + repo2docker + JupyterLab for the MVP. Keep BinderHub/JupyterHub behind the future runtime boundary.
+
+**Rationale**: The MVP risks are source resolution, reproducible environment construction, persistence, sandboxing, GPU passthrough, and same-runtime agent operation. Kubernetes would add unrelated moving parts.
+
+**Alternatives considered**: BinderHub/JupyterHub immediately; direct host Python/virtualenv execution.
 
 ## Decision 2: Keep public contracts backend-neutral
 
-`/open` and workspace semantics are launcher contracts; semantic MCP capabilities are the agent contract. Docker, repo2docker, BinderHub, JupyterHub, Colab MCP, Jupyter MCP, gVisor, and Kata remain replaceable implementation details.
+**Decision**: `/open`, workspace semantics, and semantic MCP capabilities are launcher contracts. Runtime, sandbox, notebook server, and MCP implementation names remain internal.
 
-## Decision 3: Resolve Git refs to immutable SHAs
+**Rationale**: Future backend replacement must not break notebook links or agent expectations.
 
-Branches/tags are convenient inputs but poor provenance/cache identities. Every remote launch records an immutable commit SHA before workspace/environment creation. Slash-containing branch names are resolved against remote refs rather than parsed naïvely.
+## Decision 3: Resolve mutable Git refs to immutable SHAs
+
+**Decision**: Resolve every remote launch to a commit SHA before trust, provenance, environment identity, or workspace creation.
+
+**Rationale**: Branches/tags are convenient but unstable identities. Immutable SHAs make trust scope, caching, and provenance precise.
 
 ## Decision 4: Use repo2docker for environment preparation
 
-Do not invent another repository environment format. Use repo2docker/Binder-style declarations and cache the resulting runtime image by immutable source/environment identity.
+**Decision**: Use repo2docker/Binder-style repository declarations instead of inventing a launcher environment format.
 
-## Decision 5: Separate immutable source, persistent workspace, and disposable runtime
+**Rationale**: It already maps common repository environment declarations to reproducible Jupyter-capable images and leaves a future BinderHub path open.
+
+**Reference**: https://repo2docker.readthedocs.io/
+
+## Decision 5: Use filesystem data plus SQLite control metadata
+
+**Decision**: Keep notebook/source/workspace/artifact bytes as ordinary files, but store trust records, workspace/session lifecycle metadata, active ownership, writable-agent leases, version metadata, and bounded audit records in local SQLite.
+
+**Rationale**: The clarification pass introduced atomic uniqueness and lease requirements. SQLite provides transactions and uniqueness constraints without adding a server dependency or hiding notebook files in a database.
+
+**Alternatives considered**: mutable JSON files plus ad-hoc locks; external Postgres/Redis.
+
+## Decision 6: Separate immutable source, persistent workspace, and disposable runtime
 
 **Decision**:
 
@@ -26,68 +46,134 @@ workspace         persistent mutable user state
 runtime/kernel    disposable compute attached to workspace
 ```
 
-A fresh GitHub launch creates a fresh workspace. Runtime shutdown does not delete the workspace. Reopening a workspace starts a new runtime against the existing working copy.
+A fresh remote launch creates a fresh workspace. Runtime shutdown does not delete it. Reopen starts a new runtime against the existing working copy.
 
-**Rationale**: This matches the useful part of hosted notebook behavior while avoiding the ambiguity of mutating a Git checkout. It also lets environment cache reuse remain independent from user work persistence.
+## Decision 7: GitHub is source input, never a write target
 
-## Decision 6: GitHub is source input, never a write target
+**Decision**: Do not commit, push, create branches, inject GitHub write credentials, or rely on a writable source remote.
 
-The launcher does not commit, push, create branches, or inject GitHub credentials. The editable work tree should not depend on a writable Git remote relationship; source provenance is retained separately. Any future Git publishing capability would be a separate explicitly specified feature.
+**Rationale**: Local persistence is a separate concern from source publishing. Future Git publishing would be a separately specified feature.
 
-## Decision 7: Save a Copy is local persistence, not Git publishing
+## Decision 8: Trust prompt offers exact-commit and repository-wide scopes
 
-Save a Copy duplicates the current saved notebook into another validated workspace path or an explicitly mounted user-data location. It may include current outputs. It never modifies the source snapshot or GitHub.
+**Decision**: When a source is not already covered by trust, present two positive choices: trust the resolved commit only, or trust future revisions from that repository. Deny/cancel executes nothing.
 
-## Decision 8: Optional local user-data mount is explicit
+**Rationale**: This matches the clarified UX while preserving an immutable safe default option. Repository-wide trust is explicit and revocable.
 
-No home directory or arbitrary host directory is mounted automatically. The user may explicitly select one local directory and `ro`/`rw` mode, exposed at a stable location such as `/mnt/user-data`. Remote launch URLs cannot choose host paths.
+## Decision 9: Trust confirmation requires an interactive local nonce
 
-## Decision 9: Outbound network allowed; inbound tightly limited
+**Decision**: The trust action requires a launch-scoped one-time confirmation nonce rendered by the local trust page and not accepted from remote launch query parameters.
 
-The POC permits outbound sandbox network access because notebooks routinely need PyPI, Hugging Face, model weights, datasets, and APIs. Inbound exposure is limited to launcher-controlled services published on loopback. Stronger egress filtering is deferred.
+**Rationale**: A localhost web service can be navigated to from arbitrary web pages. An explicit local confirmation must not be forgeable by merely constructing an `/open` URL.
 
-## Decision 10: Standard sandbox is defense-in-depth, not hostile-code containment
+## Decision 10: Save a Copy is local persistence, not Git publishing
 
-Use non-root execution where compatible, no-new-privileges, dropped unnecessary capabilities, seccomp/equivalent filtering, resource limits, minimal mounts, and no Docker socket/host credentials. The trust model remains user-trusted public repositories; stronger `strict` sandbox backends remain future work.
+**Decision**: Duplicate the current saved notebook into a validated workspace-relative destination or explicitly granted writable user-data directory; default to no overwrite.
 
-## Decision 11: Require explicit trust before first remote execution
+## Decision 11: Optional local user-data access is granted through local management flow
 
-A localhost service can be reached by browser navigation and should not silently execute a newly supplied repository. Before repository-supplied build/runtime code runs, an unseen/untrusted source enters a local confirmation step showing repository, SHA, and notebook path. Trust can be remembered locally according to policy.
+**Decision**: No host folder is mounted by default. The user grants one selected directory with `ro` or `rw` mode through local CLI/management, exposed at a stable sandbox path. Remote launch URLs cannot provide a host path.
 
-## Decision 12: GPU policy is explicit
+**Rationale**: This preserves the sandbox boundary and avoids turning a browser-facing localhost endpoint into an arbitrary host-path mount primitive.
 
-Support `gpu=auto|on|off`, default `auto`. The launcher validates observable GPU/container prerequisites but does not install Windows drivers, CUDA drivers, or NVIDIA Container Toolkit.
+## Decision 12: Outbound network allowed; inbound tightly limited
 
-## Decision 13: Agent execution is P1 and uses the same Jupyter runtime
+**Decision**: Allow outbound notebook network access for packages, models, datasets, and APIs. Publish only launcher-controlled services on loopback by default.
 
-MCP attaches to the already-running Jupyter server/workspace/kernel. A second hidden runtime is prohibited because it would diverge state, outputs, filesystem, and GPU behavior.
+## Decision 13: Standard sandbox is defense-in-depth, not hostile-code containment
 
-## Decision 14: Writable default plus true readonly profile
+**Decision**: Use non-root execution where compatible, no-new-privileges, dropped unnecessary capabilities, seccomp/equivalent filtering, resource limits, minimal mounts, no Docker socket, and no host credentials.
 
-The default agent profile supports read/edit/execute/restart. `readonly` is inspection-only: no code execution and no mutation. This is intentional because arbitrary code execution can itself mutate files even if direct cell-edit tools are hidden.
+**Rationale**: The trust model remains user-trusted public repositories. A future strict runtime can provide stronger isolation.
 
-## Decision 15: Specify semantic MCP capabilities, not tool names
+## Decision 14: GPU policy is explicit
 
-Prefer adapting an existing maintained Jupyter-capable MCP backend. Conformance is measured against notebook/cell read, mutation, execution, outputs/errors, kernel restart, and permission enforcement—not package-specific tool names.
+**Decision**: Support `gpu=auto|on|off`, default `auto`. Validate the configured NVIDIA container path but do not install drivers/toolkit.
 
-## Decision 16: Use stdio as default MCP transport
+**Rationale**: CPU remains useful; `on` gives deterministic GPU-required acceptance.
 
-A command such as `notebook-launcher mcp <session-id>` resolves private session credentials locally and bridges the client to the configured backend. Raw Jupyter credentials are not returned in ordinary API/status output.
+**References**: https://docs.nvidia.com/cuda/wsl-user-guide/ and https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/
 
-## Decision 17: Notebook execution remains notebook execution
+## Decision 15: Jupyter collaboration state is the authoritative shared notebook state
 
-`notebook.execute_all` uses the active Jupyter kernel and notebook cell order, default stop-on-error, and preserves notebook/kernel state. The launcher does not silently convert the notebook to an unrelated script/runtime for agent execution.
+**Decision**: Run JupyterLab with collaboration support for the human+agent notebook document. The browser and MCP backend must operate on the same shared document/kernel.
 
-## Decision 18: Audit metadata, not notebook contents
+**Rationale**: Independent file-edit paths invite lost updates and divergent visible state.
 
-Record bounded session/operation/timing/success/error metadata. Full cell sources, binary outputs, and credentials stay out of logs by default.
+## Decision 16: Initial MCP backend is Datalayer Jupyter MCP Server 2.x
 
-## Deferred questions
+**Decision**: Adapt Datalayer `jupyter-mcp-server` 2.x as the first backend, connected to the launcher-created Jupyter server, while exposing only launcher semantic capabilities publicly.
 
-- Private repositories and authentication.
-- Git LFS/submodule policy beyond basic detection/reporting.
-- Workspace quotas, retention, garbage collection, and export/archive UX.
-- Stronger `strict` sandbox backend and egress restrictions.
-- Multi-user identity, quotas, collaboration, distributed scheduling.
-- Exact MCP backend/version after capability spike.
-- Streamable HTTP MCP and remote-agent scenarios.
+**Rationale**: It is BSD-3-Clause, maintained, can target an existing local Jupyter deployment, and exposes notebook/cell inspection and mutation, execution, outputs, and kernel control.
+
+**Reference**: https://github.com/datalayer/jupyter-mcp-server
+
+**Alternative considered**: build MCP framing/tools from scratch; fork a Colab-specific bridge; defer MCP to post-MVP.
+
+## Decision 17: Pin the exact MCP/Jupyter collaboration versions only after conformance
+
+**Decision**: The implementation targets the 2.x backend line, but the exact patch plus JupyterLab/collaboration versions are pinned in the project lockfile only after they pass the launcher conformance suite.
+
+**Rationale**: Upstream real-time collaboration regressions have been reported, including cases where MCP edits and browser edits stop persisting bidirectionally or produce invalid notebook state. Version pinning must follow acceptance evidence, not `latest` optimism.
+
+**References**:
+- https://github.com/datalayer/jupyter-mcp-server/issues/146
+- https://github.com/datalayer/jupyter-mcp-server/issues/263
+
+## Decision 18: Reject stale mutations with opaque version preconditions
+
+**Decision**: Notebook reads expose an opaque `document_version`; notebook mutations require the version they were based on. Mutable non-notebook files use analogous `file_version` preconditions. A mismatch returns a conflict and requires refresh/retry.
+
+**Rationale**: The user explicitly rejected last-write-wins. Opaque tokens let the implementation use collaboration revisions/hashes without coupling the semantic contract to YDoc internals.
+
+## Decision 19: One active notebook session per workspace
+
+**Decision**: Enforce zero-or-one active runtime per workspace using transactional control state. Reopen of an active workspace returns/directs to the existing session instead of starting another.
+
+**Rationale**: This makes kernel, GPU, workspace and agent ownership deterministic and reduces conflict surface.
+
+## Decision 20: Reconcile stale session ownership after crashes
+
+**Decision**: At launcher startup and before claiming a workspace, compare recorded active session ownership with the actual runtime. Clear stale ownership only when the runtime is confirmed absent/dead.
+
+**Rationale**: A process crash must not permanently lock a workspace or accidentally create duplicate live runtimes.
+
+## Decision 21: One writable MCP agent lease per active session
+
+**Decision**: Acquire a transactional writable-agent lease when a writable MCP bridge attaches. A second writable attachment fails until the lease is released/invalidated. Read-only attachments are not serialized by this rule.
+
+**Rationale**: Execution and mutation ordering remains deterministic while preserving non-mutating inspection flexibility.
+
+## Decision 22: Writable mode covers the entire persistent workspace
+
+**Decision**: A writable agent may create, read, modify, rename and delete any file inside the workspace and execute code in the active kernel. It cannot implicitly reach outside the sandbox or exceed an explicit user-data mount's access mode.
+
+**Rationale**: Real notebooks create configs, scripts, checkpoints, generated data, and other helper files; notebook-only write permission would break normal Colab-like workflows.
+
+## Decision 23: Readonly is inspection-only
+
+**Decision**: `readonly` permits notebook/cell/output inspection but blocks code execution, kernel restart, notebook mutation, and workspace/file mutation.
+
+**Rationale**: Arbitrary code execution is itself a write capability because it can mutate persistent files.
+
+## Decision 24: Use stdio as the default local MCP transport
+
+**Decision**: `notebook-launcher mcp <session-id>` resolves private state, acquires the appropriate lease, starts/connects the backend, and proxies over stdio. Raw Jupyter credentials stay private.
+
+## Decision 25: Notebook execution remains notebook execution
+
+**Decision**: Whole-notebook execution uses the active Jupyter kernel, preserves cell order/state, defaults to stop-on-error, and reports the failing cell. It is not translated to an unrelated script execution path.
+
+## Decision 26: Audit metadata, not notebook contents
+
+**Decision**: Record bounded session/operation/timing/outcome/lease/conflict metadata. Do not copy full cell source, binary output, tokens, or credentials to logs by default.
+
+## Deferred non-MVP work
+
+- Private repositories and credential forwarding.
+- Full Git LFS/submodule support beyond detection/actionable errors.
+- Workspace quotas, retention policy, garbage collection, archive/export UX.
+- Stronger `strict` sandbox and egress filtering.
+- Multi-user identity/collaboration/distributed scheduling.
+- Streamable HTTP/remote-agent MCP transport.
+- BinderHub/JupyterHub runtime backend.

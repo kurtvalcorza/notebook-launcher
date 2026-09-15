@@ -1,5 +1,7 @@
 # Quickstart: Local Notebook Launcher POC
 
+This guide is an acceptance/runbook for the planned MVP, not implementation code.
+
 ## Host prerequisites
 
 Inside WSL2/Linux:
@@ -11,23 +13,23 @@ repo2docker --version
 nvidia-smi  # GPU acceptance only
 ```
 
-For GPU containers, first prove the host/runtime independently:
+For GPU containers, first prove host/container GPU access independently:
 
 ```bash
 docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 ```
 
-## Start launcher
+## Start the launcher
 
 ```bash
 git clone https://github.com/kurtvalcorza/notebook-launcher.git
 cd notebook-launcher
 git switch 001-local-notebook-launcher
 uv sync --dev
-uv run notebook-launcher
+uv run notebook-launcher serve
 ```
 
-Default listener:
+Expected default listener:
 
 ```text
 http://127.0.0.1:8080
@@ -45,30 +47,47 @@ or:
 http://127.0.0.1:8080/open?repo=kurtvalcorza/swin-segmentation-pipeline&ref=main&path=tutorials/swin_segmentation_task_inference.ipynb
 ```
 
-The first launch of an untrusted source may show a local confirmation page identifying repository, immutable SHA, and notebook before any repository-supplied code/environment setup executes.
+For a source not covered by local trust, verify that execution pauses at a local confirmation page showing repository, immutable SHA, and notebook path. The page must offer:
+
+```text
+Trust this exact commit
+Trust this repository for future revisions
+Cancel / deny
+```
+
+Cancel/deny must produce zero repository-supplied notebook/setup execution.
+
+## Trust management acceptance
+
+After granting trust:
+
+```bash
+uv run notebook-launcher trust list
+uv run notebook-launcher trust revoke <TRUST_ID>
+```
+
+Verify exact-commit trust prompts again for a different SHA, while repository-wide trust covers later SHAs from the same repository until revoked.
 
 ## Workspace behavior
 
-The remote source is not edited. The launcher creates persistent local work:
+The remote source is not edited:
 
 ```text
-source snapshot @ SHA   immutable
+source snapshot @ SHA   immutable provenance
 workspace/work/         editable + persistent
 workspace/outputs/      generated artifacts + persistent
-runtime/container       disposable
+runtime                 disposable
 ```
 
-Edit/run the notebook normally in JupyterLab. Stop the runtime and reopen with:
+Edit/run normally in JupyterLab. Stop the runtime, then reopen:
 
 ```text
 http://127.0.0.1:8080/open?workspace_id=<WORKSPACE_ID>
 ```
 
-The existing working copy is reused.
+Verify the existing working copy is reused. While that workspace is already active, a second reopen request must return/direct to the existing session rather than create another runtime.
 
 ## Save a Copy
-
-Conceptual API:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/workspaces/<WORKSPACE_ID>/notebooks/copy \
@@ -77,21 +96,30 @@ curl -X POST http://127.0.0.1:8080/api/workspaces/<WORKSPACE_ID>/notebooks/copy 
     "source_path": "tutorials/example.ipynb",
     "destination_scope": "workspace",
     "destination_path": "copies/example-copy.ipynb",
-    "include_outputs": true
+    "include_outputs": true,
+    "overwrite": false
   }'
 ```
 
-This is local copying only. It never commits, pushes, creates a Git branch, or modifies GitHub.
+Verify both notebooks exist and GitHub remains unchanged.
 
-## Optional local data mount
+## Optional local data grant
 
-No host folder is mounted by default. A user may explicitly configure one local directory as `ro` or `rw`; the runtime sees it at a stable path such as:
+No host directory is mounted by default. Grant one locally:
 
-```text
-/mnt/user-data
+```bash
+uv run notebook-launcher workspace mount <WORKSPACE_ID> /path/to/data --mode ro
+# or explicit writable access
+uv run notebook-launcher workspace mount <WORKSPACE_ID> /path/to/data --mode rw
 ```
 
-The repository launch URL cannot choose that host path. Do not mount your whole home directory merely for convenience.
+The runtime sees the selected directory at the configured user-data mount (planned default `/mnt/user-data`). The remote launch URL cannot choose that path. Whole-home mounts should be rejected by default.
+
+Remove the grant with:
+
+```bash
+uv run notebook-launcher workspace unmount <WORKSPACE_ID>
+```
 
 ## GPU modes
 
@@ -103,7 +131,7 @@ Append one of:
 &gpu=off
 ```
 
-GPU check:
+Inside the notebook:
 
 ```python
 import torch
@@ -111,29 +139,31 @@ print(torch.cuda.is_available())
 print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
 ```
 
-## Agent modes
+## Agent profiles
 
-Default writable agent:
+Writable (default):
 
 ```text
 &agent_mode=write
 ```
 
-Inspection-only agent:
+Readonly:
 
 ```text
 &agent_mode=readonly
 ```
 
-`readonly` cannot execute code, edit cells, restart the kernel, or mutate workspace state.
+Readonly must reject execution, kernel restart, notebook mutation, and workspace-file mutation while allowing notebook/cell/output inspection.
 
-## Attach MCP agent
+## Attach an MCP agent
+
+Inspect the non-secret descriptor:
 
 ```bash
 curl http://127.0.0.1:8080/api/sessions/<SESSION_ID>/mcp
 ```
 
-Generic stdio client configuration:
+Generic stdio configuration:
 
 ```json
 {
@@ -142,32 +172,47 @@ Generic stdio client configuration:
 }
 ```
 
-Raw Jupyter tokens are not copied into client configuration.
+The bridge resolves Jupyter credentials privately. In writable mode it atomically acquires the session's writable-agent lease.
 
-## Writable agent acceptance
+Start a second writable MCP bridge for the same session and verify it fails with a clear `writable_agent_busy` outcome. Disconnect the first bridge and verify a new writable bridge can then attach.
 
-1. Read the active notebook.
-2. Edit/insert a controlled cell.
-3. Execute the cell and observe output in the same Jupyter kernel.
-4. Execute the notebook in order.
-5. Encounter a deliberate failing cell and inspect traceback.
-6. Repair the cell and continue/re-run.
-7. Restart the kernel and execute again.
-8. For GPU sessions, confirm MCP and browser GPU probes agree.
+## Writable-agent acceptance
+
+1. Read the active notebook and record its opaque `document_version`.
+2. Edit/insert a controlled cell using that version.
+3. Execute the cell and observe output in the same Jupyter kernel/browser notebook.
+4. Create, edit, rename, and delete representative non-notebook files inside `/workspace`.
+5. Execute the notebook in order.
+6. Encounter a deliberate failing cell and inspect traceback.
+7. Repair the cell and continue/re-run.
+8. Restart the kernel and execute again.
+9. For GPU sessions, confirm MCP and browser GPU probes agree.
+
+## Human/agent conflict acceptance
+
+1. Agent reads a notebook and receives version `V1`.
+2. Human edits/saves the same notebook in JupyterLab so authoritative state becomes `V2`.
+3. Agent attempts a mutation based on `V1`.
+4. Verify the mutation fails as `conflict`, returns/currently exposes the new version, and does not overwrite the human edit.
+5. Agent refreshes, receives `V2`, reapplies a valid mutation, and both browser and disk show the result.
+6. Repeat in the opposite order and verify subsequent browser edits still persist after MCP edits.
+
+This is a backend-conformance gate; silent bidirectional sync loss is a failure.
 
 ## Persistence acceptance
 
-1. Edit a notebook and save it.
-2. Generate a file under `/outputs`.
+1. Edit and save a notebook.
+2. Generate files under `/outputs` and another ordinary path under `/workspace`.
 3. Stop the session.
-4. Reopen the same workspace ID.
-5. Confirm edit, notebook outputs, and generated file survive.
-6. Save a copy and confirm both notebooks exist.
+4. Confirm the MCP bridge/lease becomes invalid.
+5. Reopen the same workspace ID.
+6. Confirm notebook edits, saved outputs, and both generated files survive.
+7. Save a copy and confirm both notebooks exist.
 
-## Sandbox/network expectations
+## Sandbox/network acceptance
 
-The standard runtime is restricted and receives only explicit mounts. It has outbound network access for packages/models/data/APIs, but Jupyter is published only to loopback and no general inbound sandbox ports are exposed.
+Verify the runtime has only explicit mounts, no Docker socket/SSH/GitHub credentials, and no unrelated host directory access. Outbound package/model/data/API requests may work; Jupyter and launcher services remain loopback-only by default.
 
-## Trust note
+## Trust and threat note
 
-Only launch public repositories you trust. Sandboxing is defense-in-depth, not a promise that arbitrary malicious code is safe. The runtime receives no GitHub credentials by default and this feature never writes back to GitHub.
+Only launch public repositories you trust. Sandboxing is defense-in-depth, not a promise that arbitrary malicious code is safe. Repository-wide trust is intentionally broader than exact-commit trust and should be used only when the user is comfortable trusting future revisions from that repository.
