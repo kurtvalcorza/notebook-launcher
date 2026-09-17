@@ -6,7 +6,8 @@ This implementation is being built against the approved specification in `specs/
 
 ## Current implementation tranche
 
-This branch implements the pure-Python control-plane foundation only:
+This branch implements the control-plane foundation plus bounded host/source
+primitives:
 
 - package/configuration bootstrap;
 - typed public errors;
@@ -18,10 +19,20 @@ This branch implements the pure-Python control-plane foundation only:
 - notebook/file version guards;
 - bounded audit records;
 - strict GitHub source/path parsing helpers;
+- structured argv-only subprocess execution with timeout/cancellation, process-tree
+  cleanup, redaction, and bounded output capture;
+- host capability diagnostics for Git, Docker, repo2docker, Jupyter collaboration,
+  MCP, GPU, state storage, and network-policy support;
+- credential-free exact-SHA source acquisition with immutable cache snapshots;
+- deterministic environment identities and Docker image-cache lookup;
 - FastAPI/CLI skeletons;
 - unit tests for these components.
 
-It intentionally does **not** claim completion of Docker/repo2docker sandboxing, network enforcement, Jupyter collaboration, MCP backend integration, kernel execution ownership, GPU validation, or end-to-end launch behavior. Those require local runtime validation.
+It intentionally does **not** claim completion of repo2docker image builds, Docker
+runtime sandboxing, network enforcement, Jupyter collaboration, MCP backend
+integration, kernel execution ownership, GPU runtime acceptance, or end-to-end
+launch behavior. Those require the remaining implementation and local runtime
+validation.
 
 ## Security model
 

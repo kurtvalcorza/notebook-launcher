@@ -33,7 +33,7 @@ http://127.0.0.1:8080
 Navigate to:
 
 ```text
-http://127.0.0.1:8080/open?url=https://github.com/kurtvalcorza/swin-segmentation-pipeline/blob/main/tutorials/swin_segmentation_task_inference.ipynb
+http://127.0.0.1:8080/open?url=https://github.com/kurtvalcorza/swin-segmentation-pipeline/blob/main/tutorials/swin_segmentation_colab.ipynb
 ```
 
 Expected preview shows:

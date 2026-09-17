@@ -37,9 +37,9 @@
 - [ ] T015 [P] Implement bounded sanitized audit persistence in `src/notebook_launcher/audit.py`
 - [ ] T016 [P] Implement document/file version primitives and active-notebook generic-file guard in `src/notebook_launcher/versions.py`
 - [ ] T017 [P] Implement writable lease acquire/release/reconcile in `src/notebook_launcher/leases.py`
-- [ ] T018 [P] Implement structured argv subprocess helper with cancellation/redaction/bounded logs in `src/notebook_launcher/orchestration.py`
+- [X] T018 [P] Implement structured argv subprocess helper with cancellation/redaction/bounded logs in `src/notebook_launcher/orchestration.py`
 - [ ] T019 Implement launch/session state transitions in `src/notebook_launcher/state.py`
-- [ ] T020 [P] Implement host diagnostics for Git/Docker/repo2docker/Jupyter collaboration/MCP/GPU/network-policy capability in `src/notebook_launcher/environment.py`
+- [X] T020 [P] Implement host diagnostics for Git/Docker/repo2docker/Jupyter collaboration/MCP/GPU/network-policy capability in `src/notebook_launcher/environment.py`
 - [ ] T021 Run/fix foundational tests in `tests/unit/`
 
 ---
@@ -65,9 +65,9 @@
 - [ ] T033 [US1] Implement repository metadata lookup including stable numeric ID/node ID and immutable ref resolution in `src/notebook_launcher/source.py`
 - [ ] T034 [P] [US1] Implement signed request-bound one-time local launch authorization tokens and replay checks in `src/notebook_launcher/launch_auth.py`
 - [ ] T035 [P] [US1] Implement stable-ID trust lookup/create/revoke and grant-time/current-name handling in `src/notebook_launcher/trust.py`
-- [ ] T036 [US1] Implement immutable source acquisition/cache and notebook existence validation in `src/notebook_launcher/repository.py`
+- [X] T036 [US1] Implement immutable source acquisition/cache and notebook existence validation in `src/notebook_launcher/repository.py`
 - [ ] T037 [US1] Implement fresh workspace materialization with immutable provenance in `src/notebook_launcher/workspace.py`
-- [ ] T038 [P] [US1] Implement deterministic environment identity/build cache in `src/notebook_launcher/environment.py`
+- [X] T038 [P] [US1] Implement deterministic environment identity/build cache in `src/notebook_launcher/environment.py`
 - [ ] T039 [US1] Implement repo2docker build/cache miss behavior and redacted failures in `src/notebook_launcher/environment.py`
 - [ ] T040 [US1] Implement non-executing GET `/open` preview page and anti-framing headers in `src/notebook_launcher/app.py`
 - [ ] T041 [US1] Implement `POST /api/launches` token consumption, same-origin/local checks, request/source identity revalidation, and transition to trust/acquisition in `src/notebook_launcher/app.py`
