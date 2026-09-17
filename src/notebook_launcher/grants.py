@@ -6,8 +6,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from .errors import HostPathEscape
+from .safe_paths import RootIdentity, canonical_grant_root, validate_root_identity
 from .state import StateStore
-from .workspace import canonical_grant_root
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +47,11 @@ class UserDataGrantStore:
         if mode not in {"ro", "rw"}:
             raise ValueError("mode must be ro or rw")
         canonical = canonical_grant_root(path, home=home)
-        stat = canonical.stat()
+        root_stat = canonical.stat(follow_symlinks=False)
+        identity = RootIdentity(
+            root_stat.st_dev,
+            root_stat.st_ino,
+        )
         grant_id = uuid4()
         now = datetime.now(UTC)
         try:
@@ -63,11 +68,19 @@ class UserDataGrantStore:
                         str(workspace_id),
                         str(path),
                         str(canonical),
-                        str(stat.st_dev),
-                        str(stat.st_ino),
+                        str(identity.device),
+                        str(identity.inode),
                         mode,
                         now.isoformat(),
                     ),
+                )
+                conn.execute(
+                    """
+                    UPDATE workspaces
+                    SET user_data_grant_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (str(grant_id), now.isoformat(), str(workspace_id)),
                 )
         except sqlite3.IntegrityError as exc:
             raise ValueError("workspace already has an active data grant or does not exist") from exc
@@ -76,8 +89,8 @@ class UserDataGrantStore:
             workspace_id=workspace_id,
             display_path=path,
             canonical_root=canonical,
-            root_dev=stat.st_dev,
-            root_ino=stat.st_ino,
+            root_dev=identity.device,
+            root_ino=identity.inode,
             mode=mode,
             created_at=now,
         )
@@ -111,14 +124,17 @@ class UserDataGrantStore:
         record = self.active(workspace_id)
         if record is None:
             return None
-        current = record.display_path.expanduser().resolve(strict=True)
-        stat = current.stat()
-        if (
-            current != record.canonical_root
-            or not current.is_dir()
-            or stat.st_dev != record.root_dev
-            or stat.st_ino != record.root_ino
-        ):
+        try:
+            current = record.display_path.expanduser().resolve(strict=True)
+            validate_root_identity(
+                current,
+                RootIdentity(record.root_dev, record.root_ino),
+            )
+        except (OSError, HostPathEscape, RuntimeError, ValueError) as exc:
+            raise RuntimeError(
+                "granted directory identity changed or became unavailable"
+            ) from exc
+        if current != record.canonical_root:
             raise RuntimeError("granted directory identity changed or became unavailable")
         return record
 
@@ -133,4 +149,13 @@ class UserDataGrantStore:
                 """,
                 (now, str(workspace_id)),
             )
+            if cursor.rowcount == 1:
+                conn.execute(
+                    """
+                    UPDATE workspaces
+                    SET user_data_grant_id = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, str(workspace_id)),
+                )
         return cursor.rowcount == 1

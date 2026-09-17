@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .mcp import MIN_MCP_OUTPUT_BYTES
 
 
 class Settings(BaseSettings):
@@ -19,10 +22,28 @@ class Settings(BaseSettings):
     trust_challenge_ttl_seconds: int = 600
     execution_timeout_seconds: int = 1800
     execution_cancel_grace_seconds: int = 10
-    max_agent_output_bytes: int = 1024 * 1024
+    max_agent_output_bytes: int = Field(
+        default=1024 * 1024,
+        ge=MIN_MCP_OUTPUT_BYTES,
+        description=(
+            "Maximum MCP wire response bytes, including the newline; must fit "
+            f"tool discovery ({MIN_MCP_OUTPUT_BYTES} bytes for current capabilities)."
+        ),
+    )
+    writable_lease_stale_seconds: int = Field(default=30, ge=3)
+    writable_lease_heartbeat_seconds: int = Field(default=10, ge=1)
     runtime_memory: str = "8g"
     runtime_cpus: float = 4.0
     runtime_pids_limit: int = 1024
+    approved_dns_endpoints: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_lease_timing(self) -> Self:
+        if self.writable_lease_heartbeat_seconds >= self.writable_lease_stale_seconds:
+            raise ValueError(
+                "writable lease heartbeat interval must be shorter than stale TTL"
+            )
+        return self
 
     @property
     def state_db(self) -> Path:

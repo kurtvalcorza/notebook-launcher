@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
-from uuid import uuid4
+from uuid import UUID, uuid4
+
+from .errors import ConflictError, WorkspaceActive
+
+
+def document_path_key(path: str) -> str:
+    """Return the filesystem identity key used for optimistic concurrency."""
+    return path.casefold() if os.name == "nt" else path
 
 
 USER_DATA_GRANTS_TABLE = """
@@ -52,6 +61,9 @@ CREATE TABLE IF NOT EXISTS launches (
     state TEXT NOT NULL CHECK (
         state IN ('pending_trust','authorized','starting','ready','failed','stopped')
     ),
+    session_id TEXT,
+    message TEXT,
+    error_code TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -150,6 +162,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY,
     session_id TEXT,
     lease_id TEXT,
+    operation_id TEXT,
     operation TEXT NOT NULL,
     target TEXT,
     started_at TEXT NOT NULL,
@@ -158,6 +171,50 @@ CREATE TABLE IF NOT EXISTS audit_events (
     error_type TEXT
 );
 """
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRecord:
+    id: UUID
+    source_repository_id: int
+    source_owner: str
+    source_repository: str
+    source_commit_sha: str
+    source_notebook_path: str
+    root_path: Path
+    work_path: Path
+    outputs_path: Path
+    active_notebook_path: str
+    user_data_grant_id: UUID | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRecord:
+    id: UUID
+    workspace_id: UUID
+    runtime_id: str
+    host_port: int
+    gpu_enabled: bool
+    agent_mode: str
+    sandbox_verified: bool
+    network_verified: bool
+    collaboration_ready: bool
+    state: str
+    notebook_url: str
+    started_at: str
+    stopped_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentVersionRecord:
+    workspace_id: UUID
+    path: str
+    kind: str
+    version: str
+    content_hash: str | None
+    updated_at: str
 
 
 class StateStore:
@@ -170,6 +227,10 @@ class StateStore:
             conn.executescript(SCHEMA)
             self._ensure_column(conn, "user_data_grants", "root_dev", "TEXT")
             self._ensure_column(conn, "user_data_grants", "root_ino", "TEXT")
+            self._ensure_column(conn, "audit_events", "operation_id", "TEXT")
+            self._ensure_column(conn, "launches", "session_id", "TEXT")
+            self._ensure_column(conn, "launches", "message", "TEXT")
+            self._ensure_column(conn, "launches", "error_code", "TEXT")
             self._migrate_user_data_identity_to_text(conn)
 
     @staticmethod
@@ -232,16 +293,56 @@ class StateStore:
             conn.close()
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
+    def transaction(
+        self,
+        *,
+        rollback_compensation: Callable[[], None] | None = None,
+    ) -> Iterator[sqlite3.Connection]:
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 yield conn
-            except Exception:
+            except Exception as exc:
+                self._compensate_before_rollback(
+                    conn,
+                    original=exc,
+                    compensation=rollback_compensation,
+                )
                 conn.rollback()
                 raise
             else:
-                conn.commit()
+                try:
+                    self._commit(conn)
+                except Exception as exc:
+                    self._compensate_before_rollback(
+                        conn,
+                        original=exc,
+                        compensation=rollback_compensation,
+                    )
+                    conn.rollback()
+                    raise
+
+    @staticmethod
+    def _commit(conn: sqlite3.Connection) -> None:
+        conn.commit()
+
+    @staticmethod
+    def _compensate_before_rollback(
+        conn: sqlite3.Connection,
+        *,
+        original: Exception,
+        compensation: Callable[[], None] | None,
+    ) -> None:
+        if compensation is None:
+            return
+        try:
+            compensation()
+        except Exception as compensation_exc:  # noqa: BLE001 - preserve both failures
+            conn.rollback()
+            raise ExceptionGroup(
+                "transaction and filesystem compensation both failed",
+                [original, compensation_exc],
+            ) from original
 
     def consume_launch_jti(
         self,
@@ -311,3 +412,554 @@ class StateStore:
                 "SELECT * FROM launches WHERE id = ?",
                 (launch_id,),
             ).fetchone()
+
+    def update_launch_state(
+        self,
+        launch_id: str,
+        *,
+        expected_states: tuple[str, ...],
+        new_state: str,
+        now: str,
+        workspace_id: UUID | None = None,
+        session_id: UUID | None = None,
+        message: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        if not expected_states:
+            raise ValueError("expected_states must not be empty")
+        placeholders = ",".join("?" for _ in expected_states)
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE launches
+                SET state = ?, updated_at = ?,
+                    workspace_id = COALESCE(?, workspace_id),
+                    session_id = COALESCE(?, session_id),
+                    message = ?, error_code = ?
+                WHERE id = ? AND state IN ({placeholders})
+                """,
+                (
+                    new_state,
+                    now,
+                    str(workspace_id) if workspace_id is not None else None,
+                    str(session_id) if session_id is not None else None,
+                    message,
+                    error_code,
+                    launch_id,
+                    *expected_states,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ConflictError("Launch state changed; refresh and retry.")
+
+    def create_workspace(
+        self,
+        *,
+        workspace_id: UUID,
+        source_repository_id: int,
+        source_owner: str,
+        source_repository: str,
+        source_commit_sha: str,
+        source_notebook_path: str,
+        root_path: Path,
+        work_path: Path,
+        outputs_path: Path,
+        active_notebook_path: str,
+        now: str,
+    ) -> WorkspaceRecord:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO workspaces (
+                    id, source_repository_id, source_owner, source_repository,
+                    source_commit_sha, source_notebook_path, root_path, work_path,
+                    outputs_path, active_notebook_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(workspace_id),
+                    source_repository_id,
+                    source_owner,
+                    source_repository,
+                    source_commit_sha,
+                    source_notebook_path,
+                    str(root_path),
+                    str(work_path),
+                    str(outputs_path),
+                    active_notebook_path,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM workspaces WHERE id = ?", (str(workspace_id),)
+            ).fetchone()
+        assert row is not None
+        return _workspace_record(row)
+
+    def get_workspace(self, workspace_id: UUID) -> WorkspaceRecord | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM workspaces WHERE id = ?", (str(workspace_id),)
+            ).fetchone()
+        return _workspace_record(row) if row is not None else None
+
+    def update_active_notebook(
+        self,
+        workspace_id: UUID,
+        *,
+        expected_path: str,
+        new_path: str,
+        now: str,
+    ) -> WorkspaceRecord:
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE workspaces
+                SET active_notebook_path = ?, updated_at = ?
+                WHERE id = ? AND active_notebook_path = ?
+                """,
+                (new_path, now, str(workspace_id), expected_path),
+            )
+            if cursor.rowcount != 1:
+                raise ConflictError("Active notebook path changed; refresh and retry.")
+            conn.execute(
+                """
+                UPDATE document_versions
+                SET path = ?, updated_at = ?
+                WHERE workspace_id = ? AND path = ? AND kind = 'notebook'
+                """,
+                (new_path, now, str(workspace_id), expected_path),
+            )
+            row = conn.execute(
+                "SELECT * FROM workspaces WHERE id = ?", (str(workspace_id),)
+            ).fetchone()
+        assert row is not None
+        return _workspace_record(row)
+
+    @contextmanager
+    def active_notebook_rename_guard(
+        self,
+        workspace_id: UUID,
+        *,
+        expected_path: str,
+        new_path: str,
+        now: str,
+        rollback_compensation: Callable[[], None] | None = None,
+    ) -> Iterator[str]:
+        """Serialize an active rename with every versioned workspace write."""
+        with self.transaction(
+            rollback_compensation=rollback_compensation
+        ) as conn:
+            workspace = conn.execute(
+                "SELECT * FROM workspaces WHERE id = ?", (str(workspace_id),)
+            ).fetchone()
+            if workspace is None:
+                raise KeyError(str(workspace_id))
+            current_path = workspace["active_notebook_path"]
+            if document_path_key(current_path) != document_path_key(expected_path):
+                raise ConflictError("Active notebook path changed; refresh and retry.")
+            if document_path_key(current_path) == document_path_key(new_path):
+                raise ConflictError("Active notebook destination must be distinct.")
+
+            source_row = self._document_version_row(
+                conn, workspace_id=workspace_id, path=current_path
+            )
+            destination_row = self._document_version_row(
+                conn, workspace_id=workspace_id, path=new_path
+            )
+            if destination_row is not None:
+                raise ConflictError("Destination already has an optimistic version.")
+
+            yield current_path
+
+            cursor = conn.execute(
+                """
+                UPDATE workspaces
+                SET active_notebook_path = ?, updated_at = ?
+                WHERE id = ? AND active_notebook_path = ?
+                """,
+                (new_path, now, str(workspace_id), current_path),
+            )
+            if cursor.rowcount != 1:
+                raise ConflictError("Active notebook path changed; refresh and retry.")
+            if source_row is not None:
+                conn.execute(
+                    """
+                    UPDATE document_versions
+                    SET path = ?, updated_at = ?
+                    WHERE workspace_id = ? AND path = ?
+                    """,
+                    (new_path, now, str(workspace_id), source_row["path"]),
+                )
+
+    def active_session(self, workspace_id: UUID) -> SessionRecord | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM notebook_sessions
+                WHERE workspace_id = ?
+                  AND state IN ('starting','ready','stopping')
+                """,
+                (str(workspace_id),),
+            ).fetchone()
+        return _session_record(row) if row is not None else None
+
+    def get_session(self, session_id: UUID) -> SessionRecord | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM notebook_sessions WHERE id = ?",
+                (str(session_id),),
+            ).fetchone()
+        return _session_record(row) if row is not None else None
+
+    def sessions_in_states(self, states: tuple[str, ...]) -> tuple[SessionRecord, ...]:
+        if not states:
+            return ()
+        placeholders = ",".join("?" for _ in states)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM notebook_sessions WHERE state IN ({placeholders})",
+                states,
+            ).fetchall()
+        return tuple(_session_record(row) for row in rows)
+
+    def fail_launches_for_session(
+        self,
+        session_id: UUID,
+        *,
+        now: str,
+        message: str,
+        error_code: str,
+    ) -> int:
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE launches
+                SET state = 'failed', updated_at = ?, message = ?, error_code = ?
+                WHERE session_id = ? AND state = 'starting'
+                """,
+                (now, message, error_code, str(session_id)),
+            )
+        return cursor.rowcount
+
+    def release_session_leases(self, session_id: UUID, *, now: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE writable_agent_leases
+                SET released_at = COALESCE(released_at, ?)
+                WHERE session_id = ?
+                """,
+                (now, str(session_id)),
+            )
+
+    def claim_session(
+        self,
+        *,
+        session_id: UUID,
+        workspace_id: UUID,
+        runtime_id: str,
+        host_port: int,
+        gpu_enabled: bool,
+        agent_mode: str,
+        notebook_url: str,
+        now: str,
+        reuse_existing: bool = True,
+    ) -> tuple[SessionRecord, bool]:
+        with self.transaction() as conn:
+            existing = conn.execute(
+                """
+                SELECT * FROM notebook_sessions
+                WHERE workspace_id = ?
+                  AND state IN ('starting','ready','stopping')
+                """,
+                (str(workspace_id),),
+            ).fetchone()
+            if existing is not None:
+                if reuse_existing:
+                    return _session_record(existing), False
+                raise WorkspaceActive()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO notebook_sessions (
+                        id, workspace_id, runtime_id, host_port, gpu_enabled,
+                        agent_mode, state, notebook_url, started_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?)
+                    """,
+                    (
+                        str(session_id),
+                        str(workspace_id),
+                        runtime_id,
+                        host_port,
+                        int(gpu_enabled),
+                        agent_mode,
+                        notebook_url,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise WorkspaceActive() from exc
+            row = conn.execute(
+                "SELECT * FROM notebook_sessions WHERE id = ?", (str(session_id),)
+            ).fetchone()
+        assert row is not None
+        return _session_record(row), True
+
+    def transition_session(
+        self,
+        session_id: UUID,
+        *,
+        expected_states: tuple[str, ...],
+        new_state: str,
+        stopped_at: str | None = None,
+        sandbox_verified: bool | None = None,
+        network_verified: bool | None = None,
+        collaboration_ready: bool | None = None,
+    ) -> SessionRecord:
+        if not expected_states:
+            raise ValueError("expected_states must not be empty")
+        placeholders = ",".join("?" for _ in expected_states)
+        assignments = ["state = ?", "stopped_at = COALESCE(?, stopped_at)"]
+        values: list[object] = [new_state, stopped_at]
+        for column, value in (
+            ("sandbox_verified", sandbox_verified),
+            ("network_verified", network_verified),
+            ("collaboration_ready", collaboration_ready),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                values.append(int(value))
+        values.extend((str(session_id), *expected_states))
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE notebook_sessions
+                SET {', '.join(assignments)}
+                WHERE id = ? AND state IN ({placeholders})
+                """,
+                values,
+            )
+            if cursor.rowcount != 1:
+                raise ConflictError("Session state changed; refresh and retry.")
+            row = conn.execute(
+                "SELECT * FROM notebook_sessions WHERE id = ?", (str(session_id),)
+            ).fetchone()
+        assert row is not None
+        return _session_record(row)
+
+    def get_document_version(
+        self, workspace_id: UUID, path: str
+    ) -> DocumentVersionRecord | None:
+        with self.connect() as conn:
+            row = self._document_version_row(
+                conn, workspace_id=workspace_id, path=path
+            )
+        return _document_version_record(row) if row is not None else None
+
+    @staticmethod
+    def _document_version_row(
+        conn: sqlite3.Connection,
+        *,
+        workspace_id: UUID,
+        path: str,
+    ) -> sqlite3.Row | None:
+        rows = conn.execute(
+            "SELECT * FROM document_versions WHERE workspace_id = ?",
+            (str(workspace_id),),
+        ).fetchall()
+        key = document_path_key(path)
+        matches = [row for row in rows if document_path_key(row["path"]) == key]
+        if len(matches) > 1:
+            raise ConflictError(
+                "Ambiguous persisted document path aliases; repair state before retrying."
+            )
+        return matches[0] if matches else None
+
+    @contextmanager
+    def document_write_guard(
+        self,
+        *,
+        workspace_id: UUID,
+        path: str,
+        kind: str,
+        version: str,
+        content_digest: str | None,
+        expected_version: str | None,
+        now: str,
+        allow_active_notebook: bool = False,
+        rollback_compensation: Callable[[], None] | None = None,
+    ) -> Iterator[None]:
+        """Serialize a file replacement with its optimistic version update."""
+        with self.transaction(
+            rollback_compensation=rollback_compensation
+        ) as conn:
+            workspace = conn.execute(
+                "SELECT active_notebook_path FROM workspaces WHERE id = ?",
+                (str(workspace_id),),
+            ).fetchone()
+            if workspace is None:
+                raise KeyError(str(workspace_id))
+            if (
+                not allow_active_notebook
+                and document_path_key(path)
+                == document_path_key(workspace["active_notebook_path"])
+            ):
+                raise ConflictError(
+                    "The active notebook must be changed through notebook-aware "
+                    "operations."
+                )
+            row = self._document_version_row(
+                conn, workspace_id=workspace_id, path=path
+            )
+            if row is None:
+                if expected_version is not None:
+                    raise ConflictError()
+            elif expected_version is None or row["version"] != expected_version:
+                raise ConflictError()
+            yield
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO document_versions (
+                        workspace_id, path, kind, version, content_hash, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(workspace_id),
+                        path,
+                        kind,
+                        version,
+                        content_digest,
+                        now,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE document_versions
+                    SET kind = ?, version = ?, content_hash = ?, updated_at = ?
+                    WHERE workspace_id = ? AND path = ? AND version = ?
+                    """,
+                    (
+                        kind,
+                        version,
+                        content_digest,
+                        now,
+                        str(workspace_id),
+                        row["path"],
+                        expected_version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ConflictError()
+
+    def set_document_version(
+        self,
+        *,
+        workspace_id: UUID,
+        path: str,
+        kind: str,
+        version: str,
+        content_digest: str | None,
+        expected_version: str | None,
+        now: str,
+    ) -> DocumentVersionRecord:
+        with self.transaction() as conn:
+            row = self._document_version_row(
+                conn, workspace_id=workspace_id, path=path
+            )
+            if row is None:
+                if expected_version is not None:
+                    raise ConflictError()
+                conn.execute(
+                    """
+                    INSERT INTO document_versions (
+                        workspace_id, path, kind, version, content_hash, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(workspace_id),
+                        path,
+                        kind,
+                        version,
+                        content_digest,
+                        now,
+                    ),
+                )
+            else:
+                if expected_version is None or row["version"] != expected_version:
+                    raise ConflictError()
+                conn.execute(
+                    """
+                    UPDATE document_versions
+                    SET kind = ?, version = ?, content_hash = ?, updated_at = ?
+                    WHERE workspace_id = ? AND path = ? AND version = ?
+                    """,
+                    (
+                        kind,
+                        version,
+                        content_digest,
+                        now,
+                        str(workspace_id),
+                        row["path"],
+                        expected_version,
+                    ),
+                )
+            updated = self._document_version_row(
+                conn, workspace_id=workspace_id, path=path
+            )
+        assert updated is not None
+        return _document_version_record(updated)
+
+
+def _workspace_record(row: sqlite3.Row) -> WorkspaceRecord:
+    return WorkspaceRecord(
+        id=UUID(row["id"]),
+        source_repository_id=row["source_repository_id"],
+        source_owner=row["source_owner"],
+        source_repository=row["source_repository"],
+        source_commit_sha=row["source_commit_sha"],
+        source_notebook_path=row["source_notebook_path"],
+        root_path=Path(row["root_path"]),
+        work_path=Path(row["work_path"]),
+        outputs_path=Path(row["outputs_path"]),
+        active_notebook_path=row["active_notebook_path"],
+        user_data_grant_id=(
+            UUID(row["user_data_grant_id"])
+            if row["user_data_grant_id"] is not None
+            else None
+        ),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _session_record(row: sqlite3.Row) -> SessionRecord:
+    return SessionRecord(
+        id=UUID(row["id"]),
+        workspace_id=UUID(row["workspace_id"]),
+        runtime_id=row["runtime_id"],
+        host_port=row["host_port"],
+        gpu_enabled=bool(row["gpu_enabled"]),
+        agent_mode=row["agent_mode"],
+        sandbox_verified=bool(row["sandbox_verified"]),
+        network_verified=bool(row["network_verified"]),
+        collaboration_ready=bool(row["collaboration_ready"]),
+        state=row["state"],
+        notebook_url=row["notebook_url"],
+        started_at=row["started_at"],
+        stopped_at=row["stopped_at"],
+    )
+
+
+def _document_version_record(row: sqlite3.Row) -> DocumentVersionRecord:
+    return DocumentVersionRecord(
+        workspace_id=UUID(row["workspace_id"]),
+        path=row["path"],
+        kind=row["kind"],
+        version=row["version"],
+        content_hash=row["content_hash"],
+        updated_at=row["updated_at"],
+    )

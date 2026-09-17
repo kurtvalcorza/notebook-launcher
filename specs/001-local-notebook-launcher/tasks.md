@@ -4,6 +4,39 @@
 
 **Tests**: Required by constitution and specification. Story tests are written before corresponding implementation.
 
+## Execution update — 2026-09-17
+
+The original checklist below is retained as the specification decomposition.
+Current completion and evidence maturity are governed by this execution update
+and the repository's current test results; an unchecked original line does not
+override recorded implementation evidence.
+
+Completed locally: setup/foundational control state; preview and one-time launch
+authorization; trust create/list/revoke/deny plus trust-time identity
+re-resolution; exact-SHA source cache; repo2docker build/cache; persistent
+workspace and Save a Copy; sandbox argv; IPv4 firewall policy; GPU policy;
+canonical grants and safe paths; production launch/stop/reopen pipeline; private
+MCP credential bridge; writable lease; readonly enforcement; bounded output; and
+the E2E fixture/image/Jupyter/MCP component smoke.
+
+Open implementation/acceptance task IDs:
+
+- backend and shared-state semantics: T072, T080–T089, T091, T094–T098,
+  T100, T103–T105;
+- environment acceptance: T030, T045, T051, T053–T054, T062, T075, T108,
+  T113, T117, T124, T134, T141–T142;
+- lifecycle/E2E/contracts: T126–T128, T130, T136–T140, T143, T145;
+- additional identity/drive-by coverage: T023, T027–T029, T031.
+
+Release-blocking findings are the missing conforming backend capabilities,
+atomic shared-document conflict control, live message-owned cancellation,
+dual-client collaboration/YDoc acceptance, process-restart integration,
+same-namespace Linux firewall acceptance, and configured GPU acceptance.
+Authoritative collaboration-session readiness and stale persisted-start
+reconciliation are implemented and covered by focused tests. Documentation task
+T144 is complete for the current candid status; it must be refreshed again when
+those gates close.
+
 ## Format
 
 `[ID] [P?] [Story?] Description with exact path`

@@ -4,16 +4,22 @@ import hashlib
 import platform
 import sys
 import tempfile
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
 
 from .config import Settings
 from .errors import ExecutionTimeout
 from .orchestration import CommandResult, run_argv
 
-
 Runner = Callable[..., CommandResult]
+RUNTIME_APPENDIX = (
+    "RUN python -m pip install --no-cache-dir "
+    "jupyterlab==4.6.3 jupyter-collaboration==5.0.3 notebook==7.6.0"
+)
+RUNTIME_STRATEGY_VERSION = (
+    "repo2docker-v2-jupyterlab-4.6.3-collaboration-5.0.3-notebook-7.6.0"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +48,24 @@ class EnvironmentIdentity:
     image_tag: str
 
 
+@dataclass(frozen=True, slots=True)
+class EnvironmentBuildResult:
+    identity: EnvironmentIdentity
+    cache_hit: bool
+    image_id: str
+    duration_ms: int
+
+
+class EnvironmentBuildError(RuntimeError):
+    """A bounded, secret-safe repo2docker build failure."""
+
+    def __init__(self, reason: str, *, detail: str | None = None) -> None:
+        self.reason = reason
+        self.detail = detail
+        message = reason if detail is None else f"{reason}: {detail}"
+        super().__init__(message)
+
+
 class DockerEnvironmentCache:
     def __init__(self, *, runner: Runner = run_argv) -> None:
         self.runner = runner
@@ -64,13 +88,122 @@ class DockerEnvironmentCache:
             return False
         return result.returncode == 0 and bool(result.stdout.strip())
 
+    def image_id(self, identity: EnvironmentIdentity) -> str | None:
+        try:
+            result = self.runner(
+                (
+                    "docker",
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{.Id}}",
+                    identity.image_tag,
+                ),
+                timeout_seconds=10,
+                max_output_bytes=4096,
+            )
+        except (ExecutionTimeout, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        image_id = result.stdout.strip()
+        return image_id or None
+
+
+class Repo2DockerBuilder:
+    """Build deterministic repo2docker images without invoking a shell."""
+
+    def __init__(
+        self,
+        *,
+        runner: Runner = run_argv,
+        executable: str | Sequence[str] | None = None,
+        timeout_seconds: float = 3600,
+        max_output_bytes: int = 64 * 1024,
+        runtime_appendix: str = RUNTIME_APPENDIX,
+    ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if max_output_bytes <= 0:
+            raise ValueError("max_output_bytes must be positive")
+        self.runner = runner
+        if executable is None:
+            self.executable = (sys.executable, "-m", "repo2docker")
+        elif isinstance(executable, str):
+            self.executable = (executable,)
+        else:
+            self.executable = tuple(executable)
+        if not self.executable or any(
+            not item or "\x00" in item for item in self.executable
+        ):
+            raise ValueError("repo2docker executable argv is invalid")
+        self.timeout_seconds = timeout_seconds
+        self.max_output_bytes = max_output_bytes
+        self.runtime_appendix = runtime_appendix
+        self.cache = DockerEnvironmentCache(runner=runner)
+
+    def ensure(
+        self,
+        identity: EnvironmentIdentity,
+        source_root: Path,
+        *,
+        redact_values: Sequence[str] = (),
+    ) -> EnvironmentBuildResult:
+        source_root = source_root.resolve(strict=True)
+        if not source_root.is_dir():
+            raise ValueError("repo2docker source_root must be a directory")
+
+        cached_id = self.cache.image_id(identity)
+        if cached_id is not None:
+            return EnvironmentBuildResult(identity, True, cached_id, 0)
+
+        argv = (
+            *self.executable,
+            "--no-run",
+            "--image-name",
+            identity.image_tag,
+            "--user-id",
+            "1000",
+            "--user-name",
+            "jovyan",
+            "--appendix",
+            self.runtime_appendix,
+            str(source_root),
+        )
+        try:
+            result = self.runner(
+                argv,
+                timeout_seconds=self.timeout_seconds,
+                max_output_bytes=self.max_output_bytes,
+                redact_values=tuple(redact_values),
+            )
+        except ExecutionTimeout as exc:
+            raise EnvironmentBuildError("repo2docker_timeout") from exc
+        except OSError as exc:
+            raise EnvironmentBuildError(
+                "repo2docker_unavailable",
+                detail=type(exc).__name__,
+            ) from exc
+        if result.returncode != 0:
+            raise EnvironmentBuildError(f"repo2docker_failed_{result.returncode}")
+
+        image_id = self.cache.image_id(identity)
+        if image_id is None:
+            raise EnvironmentBuildError("repo2docker_image_missing_after_build")
+        return EnvironmentBuildResult(
+            identity=identity,
+            cache_hit=False,
+            image_id=image_id,
+            duration_ms=result.duration_ms,
+        )
+
 
 def environment_identity(
     *,
     repository_id: int,
     commit_sha: str,
     builder_version: str,
-    strategy_version: str = "repo2docker-v1",
+    strategy_version: str = RUNTIME_STRATEGY_VERSION,
 ) -> EnvironmentIdentity:
     normalized_sha = commit_sha.lower()
     if len(normalized_sha) != 40 or any(
@@ -192,7 +325,11 @@ def collect_host_diagnostics(
             ("docker", "version", "--format", "{{.Server.Version}}"),
             runner=runner,
         ),
-        probe_command("repo2docker", ("repo2docker", "--version"), runner=runner),
+        probe_command(
+            "repo2docker",
+            (sys.executable, "-m", "repo2docker", "--version"),
+            runner=runner,
+        ),
         probe_python_distribution(
             "jupyter_collaboration",
             "jupyter-collaboration",

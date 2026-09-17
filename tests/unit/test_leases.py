@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -50,3 +51,69 @@ def test_only_one_writable_lease_per_session(state_store):
     leases.release(first)
     second = leases.acquire(session_id, "agent-b")
     assert second != first
+
+
+def test_only_one_concurrent_writable_lease_wins(state_store):
+    session_id = _insert_session(state_store)
+    leases = WritableLeaseStore(state_store)
+
+    def acquire(index):
+        try:
+            return leases.acquire(session_id, f"agent-{index}")
+        except WritableAgentBusy:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(acquire, range(8)))
+
+    assert sum(result is not None for result in results) == 1
+
+
+def test_reconcile_releases_stopped_session_lease(state_store):
+    session_id = _insert_session(state_store)
+    leases = WritableLeaseStore(state_store)
+    lease_id = leases.acquire(session_id)
+    with state_store.transaction() as conn:
+        conn.execute(
+            "UPDATE notebook_sessions SET state = 'stopped' WHERE id = ?",
+            (str(session_id),),
+        )
+
+    assert leases.reconcile() == 1
+    assert not leases.heartbeat(lease_id)
+
+
+def test_stale_crashed_lease_is_reclaimed_atomically(state_store):
+    session_id = _insert_session(state_store)
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    leases = WritableLeaseStore(
+        state_store,
+        stale_after_seconds=30,
+        clock=lambda: current,
+    )
+    crashed = leases.acquire(session_id, "crashed-agent")
+
+    current += timedelta(seconds=31)
+    replacement = leases.acquire(session_id, "replacement-agent")
+
+    assert replacement != crashed
+    assert not leases.heartbeat(crashed)
+    assert leases.heartbeat(replacement)
+
+
+def test_recent_heartbeat_prevents_lease_reclamation(state_store):
+    session_id = _insert_session(state_store)
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    leases = WritableLeaseStore(
+        state_store,
+        stale_after_seconds=30,
+        clock=lambda: current,
+    )
+    lease_id = leases.acquire(session_id, "live-agent")
+
+    current += timedelta(seconds=20)
+    assert leases.heartbeat(lease_id)
+    current += timedelta(seconds=20)
+
+    with pytest.raises(WritableAgentBusy):
+        leases.acquire(session_id, "other-agent")

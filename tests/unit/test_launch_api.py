@@ -1,7 +1,7 @@
-from datetime import UTC, datetime
-from pathlib import Path
 import json
 import re
+from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
@@ -17,6 +17,7 @@ from notebook_launcher.state import StateStore
 class FakeResolver:
     def __init__(self):
         self.calls = 0
+        self.commit_sha = "a" * 40
 
     def resolve(self, request: LaunchRequest) -> ResolvedSource:
         self.calls += 1
@@ -26,11 +27,23 @@ class FakeResolver:
             owner="owner",
             repository="repo",
             requested_ref=request.ref or "main",
-            commit_sha="a" * 40,
+            commit_sha=self.commit_sha,
             notebook_path=request.path or "demo.ipynb",
             clone_url="https://github.com/owner/repo.git",
             resolved_at=datetime.now(UTC),
         )
+
+
+class FakePipelineLifecycle:
+    def __init__(self):
+        self.reconciliations = 0
+        self.closed = False
+
+    def reconcile_starting_sessions(self):
+        self.reconciliations += 1
+
+    def close(self):
+        self.closed = True
 
 
 def make_client(tmp_path: Path):
@@ -229,6 +242,45 @@ def test_exact_commit_trust_confirmation_is_one_time_and_authorizes_launch(tmp_p
     assert trust["commit_sha"] == "a" * 40
 
 
+def test_trust_confirmation_rejects_source_identity_change(tmp_path: Path):
+    client, resolver, state = make_client(tmp_path)
+    payload = authorize_pending(client).json()
+    launch_id = payload["launch_id"]
+    nonce = parse_qs(urlparse(payload["trust_confirmation_url"]).query)["nonce"][0]
+    resolver.commit_sha = "b" * 40
+
+    response = client.post(
+        f"/api/launches/{launch_id}/trust",
+        json={"confirmation_nonce": nonce, "decision": "trust_exact_commit"},
+        headers={"Origin": "http://127.0.0.1:8080"},
+    )
+
+    assert response.status_code == 409
+    assert "source identity changed" in response.json()["detail"]
+    assert state.get_launch(launch_id)["state"] == "pending_trust"
+    with state.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM trust_records").fetchone()[0] == 0
+
+
+def test_app_startup_reconciles_orphaned_runtime_starts(tmp_path: Path):
+    settings = Settings(root=tmp_path, host="127.0.0.1", port=8080)
+    state = StateStore(settings.state_db)
+    state.initialize()
+    pipeline = FakePipelineLifecycle()
+    services = AppServices(
+        state=state,
+        token_codec=LaunchTokenCodec(b"x" * 32),
+        resolver=FakeResolver(),
+        starter=StateLaunchStarter(state, settings),
+        pipeline=pipeline,  # type: ignore[arg-type]
+    )
+
+    with TestClient(create_app(settings, services)):
+        assert pipeline.reconciliations == 1
+
+    assert pipeline.closed
+
+
 def test_repository_trust_records_no_commit(tmp_path: Path):
     client, _resolver, state = make_client(tmp_path)
     payload = authorize_pending(client).json()
@@ -245,3 +297,46 @@ def test_repository_trust_records_no_commit(tmp_path: Path):
         trust = conn.execute("SELECT * FROM trust_records").fetchone()
     assert trust["scope"] == "repository"
     assert trust["commit_sha"] is None
+
+
+def test_contract_trust_decision_deny_creates_no_grant(tmp_path: Path):
+    client, _resolver, state = make_client(tmp_path)
+    payload = authorize_pending(client).json()
+    launch_id = payload["launch_id"]
+    nonce = parse_qs(urlparse(payload["trust_confirmation_url"]).query)["nonce"][0]
+
+    response = client.post(
+        f"/api/launches/{launch_id}/trust",
+        json={"confirmation_nonce": nonce, "decision": "deny"},
+        headers={"Origin": "http://127.0.0.1:8080"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["decision"] == "deny"
+    assert state.get_launch(launch_id)["error_code"] == "trust_denied"
+    with state.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM trust_records").fetchone()[0] == 0
+
+
+def test_trust_list_and_revoke_api(tmp_path: Path):
+    client, _resolver, _state = make_client(tmp_path)
+    payload = authorize_pending(client).json()
+    launch_id = payload["launch_id"]
+    nonce = parse_qs(urlparse(payload["trust_confirmation_url"]).query)["nonce"][0]
+    granted = client.post(
+        f"/api/launches/{launch_id}/trust",
+        json={
+            "confirmation_nonce": nonce,
+            "decision": "trust_exact_commit",
+        },
+        headers={"Origin": "http://127.0.0.1:8080"},
+    ).json()
+
+    records = client.get("/api/trust").json()
+    assert [record["id"] for record in records] == [granted["trust_id"]]
+    revoked = client.delete(
+        f"/api/trust/{granted['trust_id']}",
+        headers={"Origin": "http://127.0.0.1:8080"},
+    )
+    assert revoked.status_code == 204
+    assert client.get("/api/trust").json() == []

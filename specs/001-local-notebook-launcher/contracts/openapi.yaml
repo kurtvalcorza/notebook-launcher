@@ -109,8 +109,8 @@ paths:
                   minLength: 16
       responses:
         '200': { description: Trust decision recorded; launch may continue or terminate }
-        '400': { description: Invalid/expired/used nonce or source identity mismatch }
-        '409': { description: Launch is not awaiting trust }
+        '400': { description: Invalid request }
+        '409': { description: Invalid/expired/used nonce, source identity mismatch, or launch is not awaiting trust }
   /api/trust:
     get:
       summary: List active local trust grants
@@ -209,59 +209,67 @@ components:
   schemas:
     AuthorizedLaunchRequest:
       type: object
-      required: [launch_token]
+      required: [request, launch_token]
       properties:
+        request:
+          $ref: '#/components/schemas/LaunchRequest'
         launch_token:
           type: string
           minLength: 32
           description: Short-lived one-time token returned only in local preview page; token binds the normalized request.
+    LaunchRequest:
+      type: object
+      properties:
+        url: { type: [string, 'null'], format: uri }
+        repo: { type: [string, 'null'], pattern: '^[^/]+/[^/]+$' }
+        ref: { type: [string, 'null'] }
+        path: { type: [string, 'null'] }
+        workspace_id: { type: [string, 'null'], format: uuid }
+        gpu: { type: string, enum: [auto, on, off], default: auto }
+        agent_mode: { type: string, enum: [write, readonly], default: write }
+      description: Exactly one of workspace_id or a remote source is required; repo launches also require ref and path.
     LaunchStatus:
       type: object
-      required: [id, phase, created_at, updated_at]
+      required: [launch_id, state, trust_covered]
       properties:
-        id: { type: string, format: uuid }
-        phase:
+        launch_id: { type: string, format: uuid }
+        state:
           type: string
-          enum: [received, awaiting_trust, acquiring, workspace_preparing, building, cache_hit, starting, mcp_preparing, ready, failed, stopping, stopped]
+          enum: [pending_trust, authorized, starting, ready, failed, stopping, stopped]
+        trust_covered: { type: boolean }
         message: { type: [string, 'null'] }
         error_code: { type: [string, 'null'] }
-        repository_id: { type: [integer, 'null'] }
-        repository: { type: [string, 'null'] }
-        commit_sha: { type: [string, 'null'] }
         workspace_id: { type: [string, 'null'], format: uuid }
-        notebook_path: { type: [string, 'null'] }
         session_id: { type: [string, 'null'], format: uuid }
-        existing_session_id: { type: [string, 'null'], format: uuid }
-        ready_url: { type: [string, 'null'], format: uri }
-        gpu_enabled: { type: [boolean, 'null'] }
-        agent_mode: { type: [string, 'null'], enum: [write, readonly, null] }
-        mcp_available: { type: [boolean, 'null'] }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
+        trust_confirmation_url: { type: [string, 'null'] }
+        trust_expires_at: { type: [string, 'null'], format: date-time }
     TrustRecord:
       type: object
-      required: [id, repository_id, repository, scope, created_at]
+      required: [id, repository_id, grant_owner, grant_repository, scope, created_at]
       properties:
         id: { type: string, format: uuid }
         repository_id: { type: integer, minimum: 1 }
         repository_node_id: { type: [string, 'null'] }
-        repository: { type: string, examples: [owner/repo] }
-        grant_repository: { type: string, examples: [owner/repo] }
+        grant_owner: { type: string, examples: [owner] }
+        grant_repository: { type: string, examples: [repo] }
         scope: { type: string, enum: [exact_commit, repository] }
         commit_sha: { type: [string, 'null'] }
         created_at: { type: string, format: date-time }
     Workspace:
       type: object
-      required: [id, repository_id, repository, commit_sha, active_notebook_path, created_at, updated_at]
+      required: [id, source_repository_id, source_owner, source_repository, source_commit_sha, source_notebook_path, root_path, work_path, outputs_path, active_notebook_path, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
-        repository_id: { type: integer }
-        repository: { type: string }
-        commit_sha: { type: string }
+        source_repository_id: { type: integer }
+        source_owner: { type: string }
+        source_repository: { type: string }
+        source_commit_sha: { type: string }
+        source_notebook_path: { type: string }
+        root_path: { type: string }
+        work_path: { type: string }
         active_notebook_path: { type: string }
         outputs_path: { type: string }
-        active_session_id: { type: [string, 'null'], format: uuid }
-        user_data_mounted: { type: boolean }
+        user_data_grant_id: { type: [string, 'null'], format: uuid }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     NotebookCopyRequest:

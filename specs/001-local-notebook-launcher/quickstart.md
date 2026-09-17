@@ -1,6 +1,23 @@
 # Quickstart: Local Notebook Launcher POC
 
-This is an acceptance/runbook for the planned MVP, not implementation code.
+This is the acceptance/runbook for the current MVP worktree. Sections whose
+requirements are not yet satisfied are marked as release gates below.
+
+## Current release gates
+
+- Run the launcher and Docker daemon in the same Linux/WSL2 network namespace;
+  Windows named-pipe/remote-daemon topology intentionally fails firewall
+  attestation.
+- The pinned `jupyter-mcp-server==2.1.16` does not expose notebook move,
+  whole-notebook execution, or workspace file mutation, and does not provide an
+  atomic shared-document compare-and-swap. Do not accept those steps until a
+  conforming backend/adapter is wired.
+- Ownership-safe live cancellation remains unqualified. The launcher now
+  requires an authoritative Jupyter collaboration-session identity before it
+  marks a session ready, but dual-client WebSocket/YDoc convergence still needs
+  live acceptance.
+- Configured NVIDIA container acceptance still requires a Docker daemon with the
+  NVIDIA runtime.
 
 ## Host prerequisites
 
@@ -18,7 +35,7 @@ For GPU containers, independently prove host/container GPU access first.
 ## Start launcher
 
 ```bash
-uv sync --dev
+uv sync --extra dev --extra runtime
 uv run notebook-launcher serve
 ```
 
@@ -110,6 +127,9 @@ http://127.0.0.1:8080/open?workspace_id=<WORKSPACE_ID>
 GET must only preview the reopen. Press Launch to authorize compute restart.
 
 While workspace is already active, launch POST should return/direct to existing session, not create another runtime.
+The active session must match the requested agent mode and GPU policy; an
+incompatible or dead session must not be silently reused. A launcher restart
+must retire persisted `starting` sessions that have no in-process owner.
 
 ## 5. Save a Copy
 
@@ -153,12 +173,13 @@ Also verify attempts to reach these classes fail by default:
 - `127.0.0.0/8` / `::1`;
 - Docker/WSL host gateway;
 - `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`;
-- IPv6 ULA `fc00::/7`;
+- all IPv6 runtime networking (disabled fail-closed for the MVP);
 - link-local IPv4/IPv6;
 - metadata/link-local service endpoints;
 - multicast/non-global local targets.
 
-Configured DNS resolver may be an explicit exception. A hostname that resolves to a denied private address must still fail.
+Configured IPv4 DNS resolver may be an explicit exception. A hostname that
+resolves to a denied private address must still fail.
 
 No `host.docker.internal`/host-gateway alias should be added by default.
 
@@ -190,10 +211,11 @@ With MCP attached to notebook A:
 2. focus/edit notebook B;
 3. call MCP `notebook.read`/cell operation;
 4. verify it still targets notebook A;
-5. supported `notebook.move` of A updates the target path;
+5. after a conforming backend is wired, supported `notebook.move` of A updates
+   the target path and survives reopen;
 6. ordinary browser focus never retargets MCP.
 
-## 11. Execution ownership and cancellation
+## 11. Execution ownership and cancellation — open release gate
 
 ### Running-agent cancel
 

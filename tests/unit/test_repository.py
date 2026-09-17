@@ -4,10 +4,21 @@ from pathlib import Path
 
 import pytest
 
+import notebook_launcher.workspace as workspace_module
 from notebook_launcher.errors import RepositoryIdentityChanged, RepositorySetupFailed
 from notebook_launcher.models import ResolvedSource
 from notebook_launcher.orchestration import CommandResult
-from notebook_launcher.repository import SourceCache
+from notebook_launcher.repository import (
+    SOURCE_MANIFEST_NAME,
+    SourceCache,
+    source_tree_digest,
+)
+from notebook_launcher.state import StateStore
+from notebook_launcher.workspace import WorkspaceManager
+
+
+def seal_snapshot(root: Path) -> None:
+    (root / SOURCE_MANIFEST_NAME).write_text(f"{source_tree_digest(root)}\n")
 
 
 def source(*, clone_url="https://github.com/owner/repo.git"):
@@ -69,6 +80,7 @@ class FakeGit:
                 competing = cwd.parent / self.actual_sha / "notebooks" / "demo.ipynb"
                 competing.parent.mkdir(parents=True)
                 competing.write_text('{"winner": "other"}')
+                seal_snapshot(competing.parents[1])
             return result(argv, f"{self.actual_sha}\n")
         return result(argv)
 
@@ -94,12 +106,58 @@ def test_acquire_reuses_existing_snapshot_without_git(tmp_path):
     notebook = root / "notebooks" / "demo.ipynb"
     notebook.parent.mkdir(parents=True)
     notebook.write_text("{}")
+    seal_snapshot(root)
 
     def unexpected_runner(*_args, **_kwargs):
         raise AssertionError("git should not run on a cache hit")
 
     snapshot = SourceCache(tmp_path / "sources", runner=unexpected_runner).acquire(source())
     assert snapshot.notebook == notebook
+
+
+def test_verify_unchanged_detects_source_snapshot_mutation(tmp_path):
+    root = tmp_path / "sources" / "42" / ("a" * 40)
+    notebook = root / "notebooks" / "demo.ipynb"
+    notebook.parent.mkdir(parents=True)
+    notebook.write_text("{}")
+    seal_snapshot(root)
+    cache = SourceCache(tmp_path / "sources", runner=lambda *_args, **_kwargs: None)
+    snapshot = cache.acquire(source())
+    notebook.write_text('{"changed": true}')
+
+    with pytest.raises(RepositoryIdentityChanged):
+        cache.verify_unchanged(snapshot)
+
+    with pytest.raises(RepositoryIdentityChanged):
+        cache.acquire(source())
+
+
+def test_manifestless_cache_is_quarantined_and_rebuilt(tmp_path):
+    root = tmp_path / "sources" / "42" / ("a" * 40)
+    notebook = root / "notebooks" / "demo.ipynb"
+    notebook.parent.mkdir(parents=True)
+    notebook.write_text('{"untrusted": true}')
+
+    snapshot = SourceCache(tmp_path / "sources", runner=FakeGit()).acquire(source())
+
+    assert snapshot.notebook.read_text() == "{}"
+    quarantines = list(root.parent.glob(f".quarantine-{root.name}-*"))
+    assert len(quarantines) == 1
+    assert (quarantines[0] / "notebooks" / "demo.ipynb").read_text() == (
+        '{"untrusted": true}'
+    )
+
+
+def test_source_digest_detects_permission_mutation(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    script = root / "setup.sh"
+    script.write_text("echo ok\n")
+    before = source_tree_digest(root)
+
+    script.chmod(0o444)
+
+    assert source_tree_digest(root) != before
 
 
 def test_acquire_accepts_valid_snapshot_won_by_concurrent_writer(tmp_path):
@@ -142,3 +200,38 @@ def test_acquire_rejects_missing_notebook(tmp_path):
             tmp_path / "sources",
             runner=FakeGit(create_notebook=False, readonly_git_object=True),
         ).acquire(source())
+
+
+def test_workspace_materialization_rejects_mutate_copy_restore(tmp_path, monkeypatch):
+    cache = SourceCache(tmp_path / "sources", runner=FakeGit())
+    snapshot = cache.acquire(source())
+    original = snapshot.notebook.read_bytes()
+    real_copytree = workspace_module.shutil.copytree
+
+    def deceptive_copytree(source_root, work_root, **kwargs):
+        snapshot.notebook.write_bytes(b'{"untrusted": true}')
+        monkeypatch.setattr(workspace_module.shutil, "copytree", real_copytree)
+        try:
+            return real_copytree(source_root, work_root, **kwargs)
+        finally:
+            snapshot.notebook.write_bytes(original)
+            monkeypatch.setattr(
+                workspace_module.shutil, "copytree", deceptive_copytree
+            )
+
+    monkeypatch.setattr(workspace_module.shutil, "copytree", deceptive_copytree)
+    state = StateStore(tmp_path / "state.db")
+    state.initialize()
+    workspaces = tmp_path / "workspaces"
+    manager = WorkspaceManager(state, workspaces)
+
+    with pytest.raises(RepositoryIdentityChanged):
+        manager.create(
+            snapshot,
+            source_owner="owner",
+            source_repository="repo",
+            source_notebook_path="notebooks/demo.ipynb",
+        )
+
+    assert snapshot.notebook.read_bytes() == original
+    assert not workspaces.exists() or not any(workspaces.iterdir())

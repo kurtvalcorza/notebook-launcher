@@ -53,9 +53,19 @@ def test_grant_persists_canonical_root_and_revokes(tmp_path: Path):
         stored_types = conn.execute(
             "SELECT typeof(root_dev), typeof(root_ino) FROM user_data_grants"
         ).fetchone()
+        workspace_grant_id = conn.execute(
+            "SELECT user_data_grant_id FROM workspaces WHERE id = ?",
+            (str(workspace_id),),
+        ).fetchone()[0]
     assert tuple(stored_types) == ("text", "text")
+    assert workspace_grant_id == str(grant.id)
     assert store.revoke(workspace_id)
     assert store.active(workspace_id) is None
+    with state.connect() as conn:
+        assert conn.execute(
+            "SELECT user_data_grant_id FROM workspaces WHERE id = ?",
+            (str(workspace_id),),
+        ).fetchone()[0] is None
 
 
 def test_second_active_grant_is_rejected(tmp_path: Path):
@@ -89,4 +99,19 @@ def test_grant_revalidation_detects_replaced_path(tmp_path: Path):
     path.mkdir()
 
     with pytest.raises(RuntimeError, match="identity changed"):
+        store.revalidate(workspace_id)
+
+
+def test_grant_revalidation_detects_missing_path(tmp_path: Path):
+    state = StateStore(tmp_path / "state.db")
+    state.initialize()
+    workspace_id = uuid4()
+    insert_workspace(state, workspace_id)
+    path = tmp_path / "data"
+    path.mkdir()
+    store = UserDataGrantStore(state)
+    store.grant(workspace_id, path, mode="ro")
+    path.rmdir()
+
+    with pytest.raises(RuntimeError, match="unavailable"):
         store.revalidate(workspace_id)
