@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "notebook-launcher"
+version = "0.1.0"
+description = "Local launcher for trusted public GitHub notebooks"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "BSD-3-Clause" }
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn[standard]>=0.35,<1",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.10,<3",
+  "httpx>=0.28,<1",
+]
+
+[project.optional-dependencies]
+runtime = [
+  "jupyterlab>=4.4,<5",
+  "jupyter-collaboration>=4,<5",
+  "jupyter-repo2docker>=2025.1",
+]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6.2,<7",
+]
+
+[project.scripts]
+notebook-launcher = "notebook_launcher.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/notebook_launcher"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+markers = [
+  "docker: requires Docker",
+  "jupyter: requires Jupyter",
+  "gpu: requires configured NVIDIA GPU",
+  "integration: integration test",
+]

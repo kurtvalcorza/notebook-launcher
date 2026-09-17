@@ -1,0 +1,72 @@
+import json
+
+import httpx
+
+from notebook_launcher.github import GitHubResolver
+from notebook_launcher.models import LaunchRequest
+
+
+def response(status: int, payload: dict):
+    return httpx.Response(status, content=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+
+
+def test_repo_fields_resolve_stable_repository_id_and_commit():
+    def handler(request: httpx.Request):
+        if request.url.path == "/repos/owner/repo":
+            return response(200, {
+                "id": 42,
+                "node_id": "R_42",
+                "name": "repo",
+                "owner": {"login": "owner"},
+                "clone_url": "https://github.com/owner/repo.git",
+            })
+        if request.url.path == "/repos/owner/repo/commits/main":
+            return response(200, {"sha": "b" * 40})
+        return response(404, {})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resolver = GitHubResolver(client)
+    resolved = resolver.resolve(LaunchRequest(repo="owner/repo", ref="main", path="demo.ipynb"))
+
+    assert resolved.repository_id == 42
+    assert resolved.commit_sha == "b" * 40
+    assert resolved.notebook_path == "demo.ipynb"
+
+
+def test_blob_url_prefers_longest_valid_slash_ref():
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request.url.path)
+        if request.url.path == "/repos/owner/repo":
+            return response(200, {
+                "id": 42,
+                "node_id": "R_42",
+                "name": "repo",
+                "owner": {"login": "owner"},
+                "clone_url": "https://github.com/owner/repo.git",
+            })
+        # httpx exposes URL.path decoded; the resolver still sends the slash-ref
+        # as a percent-encoded path segment on the wire.
+        if request.url.path.endswith("/commits/feature/demo/notebooks"):
+            return response(422, {"message": "No commit found for SHA: feature/demo/notebooks"})
+        if request.url.path.endswith("/commits/feature/demo"):
+            return response(200, {"sha": "c" * 40})
+        if request.url.path.endswith("/commits/feature"):
+            return response(200, {"sha": "d" * 40})
+        return response(404, {})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resolver = GitHubResolver(client)
+    resolved = resolver.resolve(LaunchRequest(
+        url="https://github.com/owner/repo/blob/feature/demo/notebooks/example.ipynb"
+    ))
+
+    assert resolved.requested_ref == "feature/demo"
+    assert resolved.notebook_path == "notebooks/example.ipynb"
+    assert resolved.commit_sha == "c" * 40
+    assert requests == [
+        "/repos/owner/repo",
+        "/repos/owner/repo/commits/feature/demo/notebooks",
+        "/repos/owner/repo/commits/feature/demo",
+    ]
