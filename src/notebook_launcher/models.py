@@ -25,6 +25,35 @@ class TrustScope(StrEnum):
     REPOSITORY = "repository"
 
 
+class LaunchPhase(StrEnum):
+    RECEIVED = "received"
+    AWAITING_TRUST = "awaiting_trust"
+    ACQUIRING = "acquiring"
+    WORKSPACE_PREPARING = "workspace_preparing"
+    BUILDING = "building"
+    CACHE_HIT = "cache_hit"
+    STARTING = "starting"
+    MCP_PREPARING = "mcp_preparing"
+    READY = "ready"
+    FAILED = "failed"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+
+
+class McpStatus(StrEnum):
+    UNAVAILABLE = "unavailable"
+    AVAILABLE = "available"
+    ATTACHING = "attaching"
+    ATTACHED = "attached"
+    ERROR = "error"
+    INVALIDATED = "invalidated"
+
+
+class DestinationScope(StrEnum):
+    WORKSPACE = "workspace"
+    USER_DATA = "user_data"
+
+
 class SessionState(StrEnum):
     STARTING = "starting"
     READY = "ready"
@@ -55,7 +84,7 @@ class LaunchRequest(BaseModel):
     agent_mode: AgentMode = AgentMode.WRITE
 
     @model_validator(mode="after")
-    def validate_source(self) -> "LaunchRequest":
+    def validate_source(self) -> LaunchRequest:
         remote = any((self.url, self.repo, self.ref, self.path))
         if self.workspace_id and remote:
             raise ValueError("workspace_id is mutually exclusive with remote-source fields")
@@ -87,6 +116,26 @@ class LaunchPreview(BaseModel):
     expires_at: datetime
 
 
+class LaunchStatus(BaseModel):
+    id: UUID
+    phase: LaunchPhase
+    created_at: datetime
+    updated_at: datetime
+    message: str | None = None
+    error_code: str | None = None
+    repository_id: int | None = None
+    repository: str | None = None
+    commit_sha: str | None = None
+    workspace_id: UUID | None = None
+    notebook_path: str | None = None
+    session_id: UUID | None = None
+    existing_session_id: UUID | None = None
+    ready_url: str | None = None
+    gpu_enabled: bool | None = None
+    agent_mode: AgentMode | None = None
+    mcp_available: bool | None = None
+
+
 class TrustRecord(BaseModel):
     id: UUID
     repository_id: int
@@ -99,7 +148,7 @@ class TrustRecord(BaseModel):
     revoked_at: datetime | None = None
 
     @model_validator(mode="after")
-    def validate_commit_scope(self) -> "TrustRecord":
+    def validate_commit_scope(self) -> TrustRecord:
         if self.scope is TrustScope.EXACT_COMMIT and not self.commit_sha:
             raise ValueError("exact_commit trust requires commit_sha")
         if self.scope is TrustScope.REPOSITORY and self.commit_sha is not None:
@@ -134,6 +183,29 @@ class UserDataGrant(BaseModel):
     revoked_at: datetime | None = None
 
 
+class EnvironmentIdentity(BaseModel):
+    repository_id: int
+    commit_sha: str = Field(min_length=40, max_length=40)
+    builder_version: str
+    strategy_version: str
+    environment_digest: str
+    image_tag: str
+
+
+class GPUDeviceStatus(BaseModel):
+    uuid: str
+    name: str
+
+
+class EffectiveGPUStatus(BaseModel):
+    requested_mode: GPU
+    enabled: bool
+    devices: list[GPUDeviceStatus] = Field(default_factory=list)
+    host_available: bool
+    container_available: bool
+    reason: str | None = None
+
+
 class NotebookSession(BaseModel):
     id: UUID
     workspace_id: UUID
@@ -165,6 +237,14 @@ class ExecutionOperation(BaseModel):
     finished_at: datetime | None = None
 
 
+class DocumentVersion(BaseModel):
+    workspace_id: UUID
+    path: str
+    kind: str
+    version: str
+    updated_at: datetime
+
+
 class OutputEnvelope(BaseModel):
     mime_type: str | None = None
     serialized_size: int | None = None
@@ -179,3 +259,37 @@ class NetworkPolicyState(BaseModel):
     deny_non_global: bool = True
     host_gateway_alias_present: bool = False
     verified_at: datetime | None = None
+
+
+class NotebookCopyRequest(BaseModel):
+    source_path: str
+    destination_scope: DestinationScope
+    destination_path: str
+    include_outputs: bool = True
+    overwrite: bool = False
+
+
+class McpAttachment(BaseModel):
+    session_id: UUID
+    notebook_path: str
+    available: bool
+    status: McpStatus
+    transport: str = "stdio"
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    backend: str | None = None
+    agent_mode: AgentMode
+    write_lease_available: bool | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    message: str | None = None
+
+
+class AgentExecutionEvent(BaseModel):
+    session_id: UUID
+    operation_id: UUID | None = None
+    lease_id: UUID | None = None
+    operation: str
+    target: str | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    outcome: str | None = None
+    error_type: str | None = None

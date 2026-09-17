@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 
@@ -104,6 +105,40 @@ def test_run_argv_timeout_stops_descendant_processes(tmp_path):
 
     time.sleep(1.7)
     assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows job-object regression")
+def test_run_argv_stops_orphaned_grandchild_after_intermediary_exit(tmp_path):
+    grandchild_marker = tmp_path / "grandchild-survived"
+    intermediary_exited = tmp_path / "intermediary-exited"
+    grandchild_code = (
+        "import pathlib, time; "
+        "time.sleep(1.5); "
+        f"pathlib.Path({str(grandchild_marker)!r}).write_text('alive')"
+    )
+    intermediary_code = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {grandchild_code!r}])"
+    )
+    parent_code = (
+        "import pathlib, subprocess, sys, time; "
+        f"intermediary = subprocess.Popen([sys.executable, '-c', {intermediary_code!r}]); "
+        "intermediary.wait(); "
+        f"pathlib.Path({str(intermediary_exited)!r}).write_text('exited'); "
+        "time.sleep(10)"
+    )
+
+    with pytest.raises(ExecutionCancelled):
+        run_argv(
+            (sys.executable, "-c", parent_code),
+            cancel_requested=intermediary_exited.exists,
+            timeout_seconds=10,
+            terminate_grace_seconds=0.1,
+        )
+
+    assert intermediary_exited.exists()
+    time.sleep(0.9)
+    assert not grandchild_marker.exists()
 
 
 def test_run_argv_can_be_cancelled():

@@ -6,20 +6,29 @@ import json
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
-from fastapi import FastAPI, HTTPException, Request
+from typing import Literal, Protocol
+from uuid import UUID
+
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .config import Settings
-from .errors import LaunchAuthorizationError
+from .errors import LaunchAuthorizationError, LauncherError
 from .github import GitHubResolver
+from .grants import UserDataGrantStore
 from .launch_auth import LaunchTokenCodec, request_digest
-from .launches import StateLaunchStarter
-from .models import LaunchRequest, ResolvedSource, TrustScope
+from .launches import (
+    PipelineLaunchStarter,
+    StateLaunchStarter,
+    StateMcpDescriptorProvider,
+)
+from .models import LaunchRequest, NotebookCopyRequest, ResolvedSource, TrustScope
+from .pipeline import LaunchPipeline
 from .state import StateStore
 from .trust import TrustStore
 from .trust_flow import TrustFlowStore
+from .workspace import WorkspaceManager
 
 
 class LaunchResolver(Protocol):
@@ -36,12 +45,23 @@ class LaunchStarter(Protocol):
     ) -> dict[str, object]: ...
 
 
+class McpDescriptorProvider(Protocol):
+    def describe(self, session_id: UUID) -> dict[str, object] | None: ...
+
+
+class SessionLifecycle(Protocol):
+    def stop(self, session_id: UUID) -> bool: ...
+
+
 @dataclass(slots=True)
 class AppServices:
     state: StateStore
     token_codec: LaunchTokenCodec
     resolver: LaunchResolver
     starter: LaunchStarter
+    lifecycle: SessionLifecycle | None = None
+    mcp_descriptors: McpDescriptorProvider | None = None
+    pipeline: LaunchPipeline | None = None
 
 
 class LaunchPost(BaseModel):
@@ -50,8 +70,25 @@ class LaunchPost(BaseModel):
 
 
 class TrustPost(BaseModel):
-    nonce: str
-    scope: TrustScope
+    decision: Literal["trust_exact_commit", "trust_repository", "deny"] | None = None
+    confirmation_nonce: str | None = None
+    # Backward-compatible input while the local API contract is upgraded.
+    nonce: str | None = None
+    scope: TrustScope | None = None
+
+    def normalized(self) -> tuple[str, TrustScope | None]:
+        nonce = self.confirmation_nonce or self.nonce
+        if not nonce:
+            raise ValueError("confirmation_nonce is required")
+        if self.decision == "deny":
+            return nonce, None
+        if self.decision == "trust_exact_commit":
+            return nonce, TrustScope.EXACT_COMMIT
+        if self.decision == "trust_repository":
+            return nonce, TrustScope.REPOSITORY
+        if self.scope is not None:
+            return nonce, self.scope
+        raise ValueError("trust decision is required")
 
 
 def _normalized_digest(request: LaunchRequest, source: ResolvedSource | None) -> str:
@@ -101,6 +138,11 @@ def _default_services(settings: Settings) -> AppServices:
     settings.ensure_directories()
     state = StateStore(settings.state_db)
     state.initialize()
+    pipeline = LaunchPipeline(
+        settings=settings,
+        state=state,
+        approved_dns_endpoints=settings.approved_dns_endpoints,
+    )
     return AppServices(
         state=state,
         token_codec=LaunchTokenCodec(
@@ -108,8 +150,42 @@ def _default_services(settings: Settings) -> AppServices:
             ttl_seconds=settings.launch_token_ttl_seconds,
         ),
         resolver=GitHubResolver(),
-        starter=StateLaunchStarter(state, settings),
+        starter=PipelineLaunchStarter(StateLaunchStarter(state, settings), pipeline),
+        lifecycle=pipeline,
+        mcp_descriptors=StateMcpDescriptorProvider(state, settings),
+        pipeline=pipeline,
     )
+
+
+def _verify_trust_source_unchanged(
+    services: AppServices,
+    trust_flow: TrustFlowStore,
+    launch_id: str,
+) -> None:
+    saved = trust_flow.source_for_launch(launch_id)
+    if saved is None:
+        raise ValueError("launch source identity missing")
+    current = services.resolver.resolve(
+        LaunchRequest(
+            repo=f"{saved.owner}/{saved.repository}",
+            ref=saved.requested_ref,
+            path=saved.notebook_path,
+        )
+    )
+    expected = (
+        saved.repository_id,
+        saved.repository_node_id,
+        saved.commit_sha,
+        saved.notebook_path,
+    )
+    observed = (
+        current.repository_id,
+        current.repository_node_id,
+        current.commit_sha,
+        current.notebook_path,
+    )
+    if observed != expected:
+        raise ValueError("source identity changed; refresh the preview and authorize again")
 
 
 def create_app(
@@ -120,11 +196,40 @@ def create_app(
     services = services or _default_services(settings)
     trust = TrustStore(services.state)
     trust_flow = TrustFlowStore(services.state)
+    workspace_manager = WorkspaceManager(
+        services.state,
+        settings.workspaces_dir,
+        grants=UserDataGrantStore(services.state),
+    )
     app = FastAPI(title="Notebook Launcher", version="0.1.0")
+    if services.pipeline is not None:
+        app.router.add_event_handler(
+            "startup",
+            services.pipeline.reconcile_starting_sessions,
+        )
+        app.router.add_event_handler("shutdown", services.pipeline.close)
 
     @app.get("/health")
     async def health() -> dict[str, object]:
         return {"status": "ok", "host": settings.host, "port": settings.port}
+
+    @app.get("/status/{launch_id}", response_class=HTMLResponse)
+    async def status_page(launch_id: str) -> HTMLResponse:
+        row = services.state.get_launch(launch_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="launch not found")
+        body = f"""<!doctype html><html><body>
+<h1>Notebook launch status</h1>
+<p>Launch: {html.escape(launch_id)}</p>
+<p>State: {html.escape(row['state'])}</p>
+<p>Workspace: {html.escape(row['workspace_id'] or 'pending')}</p>
+</body></html>"""
+        response = HTMLResponse(body)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/open", response_class=HTMLResponse)
     async def preview(
@@ -229,9 +334,9 @@ document.getElementById('launch').addEventListener('click',async()=>{{
 <button id="repository">Trust repository</button><pre id="status"></pre>
 <script>
 const launchId={launch_js};const nonce={nonce_js};
-async function grant(scope){{const r=await fetch(`/api/launches/${{launchId}}/trust`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{nonce,scope}})}});document.getElementById('status').textContent=await r.text();}}
-document.getElementById('commit').onclick=()=>grant('exact_commit');
-document.getElementById('repository').onclick=()=>grant('repository');
+async function grant(decision){{const r=await fetch(`/api/launches/${{launchId}}/trust`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{confirmation_nonce:nonce,decision}})}});document.getElementById('status').textContent=await r.text();}}
+document.getElementById('commit').onclick=()=>grant('trust_exact_commit');
+document.getElementById('repository').onclick=()=>grant('trust_repository');
 </script></body></html>"""
         response = HTMLResponse(body)
         response.headers["X-Frame-Options"] = "DENY"
@@ -248,14 +353,22 @@ document.getElementById('repository').onclick=()=>grant('repository');
     ) -> dict[str, object]:
         _check_local_request(http_request, settings)
         try:
-            trust_id = trust_flow.complete_trust(launch_id, body.nonce, body.scope)
+            nonce, scope = body.normalized()
+            if scope is None:
+                trust_flow.deny(launch_id, nonce)
+                return {"launch_id": launch_id, "state": "failed", "decision": "deny"}
+            _verify_trust_source_unchanged(services, trust_flow, launch_id)
+            trust_id = trust_flow.complete_trust(launch_id, nonce, scope)
+            continuation = getattr(services.starter, "continue_authorized", None)
+            if continuation is not None:
+                continuation(launch_id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
             "launch_id": launch_id,
             "state": "authorized",
             "trust_id": str(trust_id),
-            "scope": body.scope.value,
+            "scope": scope.value,
         }
 
     @app.get("/api/launches/{launch_id}")
@@ -268,7 +381,97 @@ document.getElementById('repository').onclick=()=>grant('repository');
             "state": row["state"],
             "trust_covered": bool(row["trust_covered"]),
             "workspace_id": row["workspace_id"],
+            "session_id": row["session_id"],
+            "message": row["message"],
+            "error_code": row["error_code"],
         }
+
+    @app.get("/api/trust")
+    async def list_trust() -> list[dict[str, object]]:
+        return [item.model_dump(mode="json") for item in trust.list_active()]
+
+    @app.delete("/api/trust/{trust_id}", status_code=204)
+    async def revoke_trust(trust_id: UUID, http_request: Request) -> Response:
+        _check_local_request(http_request, settings)
+        if not trust.revoke(trust_id):
+            raise HTTPException(status_code=404, detail="trust grant not found")
+        return Response(status_code=204)
+
+    @app.get("/api/workspaces/{workspace_id}")
+    async def workspace_metadata(workspace_id: UUID) -> dict[str, object]:
+        record = services.state.get_workspace(workspace_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="workspace not found")
+        return {
+            "id": str(record.id),
+            "source_repository_id": record.source_repository_id,
+            "source_owner": record.source_owner,
+            "source_repository": record.source_repository,
+            "source_commit_sha": record.source_commit_sha,
+            "source_notebook_path": record.source_notebook_path,
+            "root_path": str(record.root_path),
+            "work_path": str(record.work_path),
+            "outputs_path": str(record.outputs_path),
+            "active_notebook_path": record.active_notebook_path,
+            "user_data_grant_id": (
+                str(record.user_data_grant_id)
+                if record.user_data_grant_id is not None
+                else None
+            ),
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        }
+
+    @app.post("/api/workspaces/{workspace_id}/notebooks/copy", status_code=201)
+    async def copy_notebook(
+        workspace_id: UUID,
+        body: NotebookCopyRequest,
+        http_request: Request,
+    ) -> dict[str, object]:
+        _check_local_request(http_request, settings)
+        try:
+            workspace_manager.save_copy(
+                workspace_id,
+                source_path=body.source_path,
+                destination_scope=body.destination_scope.value,
+                destination_path=body.destination_path,
+                include_outputs=body.include_outputs,
+                overwrite=body.overwrite,
+            )
+        except LauncherError as exc:
+            raise HTTPException(status_code=exc.http_status, detail=exc.public_dict()) from exc
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail="destination exists") from exc
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "workspace_id": str(workspace_id),
+            "destination_scope": body.destination_scope.value,
+            "destination_path": body.destination_path,
+        }
+
+    @app.get("/api/sessions/{session_id}/mcp")
+    async def mcp_descriptor(session_id: UUID) -> dict[str, object]:
+        if services.mcp_descriptors is None:
+            raise HTTPException(status_code=503, detail="MCP bridge is unavailable")
+        descriptor = services.mcp_descriptors.describe(session_id)
+        if descriptor is None:
+            raise HTTPException(status_code=404, detail="unknown session")
+        status = descriptor.get("status")
+        if status == "stopped":
+            raise HTTPException(status_code=410, detail="session stopped")
+        if not descriptor.get("available", False):
+            raise HTTPException(status_code=409, detail="session not ready")
+        return descriptor
+
+    @app.delete("/api/sessions/{session_id}", status_code=204)
+    async def stop_session(session_id: UUID, http_request: Request) -> Response:
+        _check_local_request(http_request, settings)
+        if services.lifecycle is None:
+            raise HTTPException(status_code=503, detail="runtime lifecycle is unavailable")
+        if not services.lifecycle.stop(session_id):
+            raise HTTPException(status_code=404, detail="unknown session")
+        return Response(status_code=204)
 
     return app
 

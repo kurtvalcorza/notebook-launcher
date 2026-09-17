@@ -21,5 +21,6 @@ build/
 Thumbs.db
 *.tmp
 *.swp
+.tmp/
 .vscode/
 .idea/

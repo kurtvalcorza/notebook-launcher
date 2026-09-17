@@ -113,3 +113,50 @@ class HostPathEscape(LauncherError):
             "The requested path resolves outside the granted directory.",
             403,
         )
+
+
+class HostPathChanged(LauncherError):
+    def __init__(self):
+        super().__init__(
+            "host_path_changed",
+            "The granted host path changed and must be authorized again.",
+            409,
+        )
+
+
+class InvalidHostPath(LauncherError):
+    def __init__(self, message: str = "The selected host path is invalid."):
+        super().__init__("invalid_host_path", message, 400)
+
+
+class NetworkPolicyUnavailable(LauncherError):
+    def __init__(self):
+        super().__init__(
+            "network_policy_unavailable",
+            "The required runtime network policy could not be applied.",
+            503,
+        )
+
+
+class SessionNotReady(LauncherError):
+    def __init__(self):
+        super().__init__(
+            "session_not_ready",
+            "The notebook session is not ready.",
+            409,
+        )
+
+
+class UnknownSession(LauncherError):
+    def __init__(self):
+        super().__init__("unknown_session", "The notebook session was not found.", 404)
+
+
+class UnknownWorkspace(LauncherError):
+    def __init__(self):
+        super().__init__("unknown_workspace", "The workspace was not found.", 404)
+
+
+class TrustNotFound(LauncherError):
+    def __init__(self):
+        super().__init__("trust_not_found", "The trust grant was not found.", 404)

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from .models import ResolvedSource, TrustScope
+from .models import ResolvedSource, TrustRecord, TrustScope
 from .state import StateStore
 
 
@@ -99,3 +99,31 @@ class TrustStore:
                 (datetime.now(UTC).isoformat(), str(trust_id)),
             )
         return cursor.rowcount == 1
+
+    def list_active(self) -> list[TrustRecord]:
+        with self.state.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM trust_records
+                WHERE revoked_at IS NULL
+                ORDER BY created_at, id
+                """
+            ).fetchall()
+        return [
+            TrustRecord(
+                id=UUID(row["id"]),
+                repository_id=int(row["repository_id"]),
+                repository_node_id=row["repository_node_id"],
+                grant_owner=row["grant_owner"],
+                grant_repository=row["grant_repository"],
+                scope=TrustScope(row["scope"]),
+                commit_sha=row["commit_sha"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                revoked_at=(
+                    datetime.fromisoformat(row["revoked_at"])
+                    if row["revoked_at"] is not None
+                    else None
+                ),
+            )
+            for row in rows
+        ]

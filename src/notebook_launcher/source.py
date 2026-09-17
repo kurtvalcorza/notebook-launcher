@@ -48,8 +48,7 @@ def parse_repo_fields(repo: str, ref: str, path: str) -> ParsedGitHubSource:
     if not _REPO_RE.fullmatch(repo):
         raise ValueError("repo must be owner/repository")
     owner, repository = repo.split("/", 1)
-    if repository.endswith(".git"):
-        repository = repository[:-4]
+    repository = repository.removesuffix(".git")
     if not ref.strip():
         raise ValueError("ref is required")
     return ParsedGitHubSource(

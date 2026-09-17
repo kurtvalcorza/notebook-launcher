@@ -20,6 +20,8 @@ class LaunchSourceIdentity:
     repository: str
     commit_sha: str
     notebook_path: str
+    requested_ref: str
+    clone_url: str
 
 
 class TrustFlowStore:
@@ -35,7 +37,9 @@ class TrustFlowStore:
                     owner TEXT NOT NULL,
                     repository TEXT NOT NULL,
                     commit_sha TEXT NOT NULL,
-                    notebook_path TEXT NOT NULL
+                    notebook_path TEXT NOT NULL,
+                    requested_ref TEXT,
+                    clone_url TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS trust_challenges (
@@ -46,6 +50,13 @@ class TrustFlowStore:
                 );
                 """
             )
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(launch_sources)")
+            }
+            if "requested_ref" not in columns:
+                conn.execute("ALTER TABLE launch_sources ADD COLUMN requested_ref TEXT")
+            if "clone_url" not in columns:
+                conn.execute("ALTER TABLE launch_sources ADD COLUMN clone_url TEXT")
 
     @staticmethod
     def _hash_nonce(nonce: str) -> str:
@@ -65,8 +76,9 @@ class TrustFlowStore:
                 """
                 INSERT OR REPLACE INTO launch_sources (
                     launch_id, repository_id, repository_node_id,
-                    owner, repository, commit_sha, notebook_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    owner, repository, commit_sha, notebook_path,
+                    requested_ref, clone_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     launch_id,
@@ -76,6 +88,8 @@ class TrustFlowStore:
                     source.repository,
                     source.commit_sha,
                     source.notebook_path,
+                    source.requested_ref,
+                    source.clone_url,
                 ),
             )
             conn.execute(
@@ -104,7 +118,38 @@ class TrustFlowStore:
             repository=row["repository"],
             commit_sha=row["commit_sha"],
             notebook_path=row["notebook_path"],
+            requested_ref=row["requested_ref"] or row["commit_sha"],
+            clone_url=row["clone_url"]
+            or f"https://github.com/{row['owner']}/{row['repository']}.git",
         )
+
+    def deny(self, launch_id: str, nonce: str) -> None:
+        now = datetime.now(UTC)
+        with self.state.transaction() as conn:
+            challenge = conn.execute(
+                "SELECT nonce_hash, expires_at, used_at FROM trust_challenges WHERE launch_id = ?",
+                (launch_id,),
+            ).fetchone()
+            if challenge is None or challenge["used_at"] is not None:
+                raise ValueError("trust challenge not found or already used")
+            if datetime.fromisoformat(challenge["expires_at"]) < now:
+                raise ValueError("trust challenge expired")
+            if not hmac.compare_digest(challenge["nonce_hash"], self._hash_nonce(nonce)):
+                raise ValueError("invalid trust challenge")
+            conn.execute(
+                "UPDATE trust_challenges SET used_at = ? WHERE launch_id = ?",
+                (now.isoformat(), launch_id),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE launches
+                SET state = 'failed', message = ?, error_code = ?, updated_at = ?
+                WHERE id = ? AND state = 'pending_trust'
+                """,
+                ("Source trust was denied.", "trust_denied", now.isoformat(), launch_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("launch is not pending trust")
 
     def validate_challenge(self, launch_id: str, nonce: str) -> bool:
         with self.state.connect() as conn:

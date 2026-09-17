@@ -132,5 +132,5 @@ class GitHubResolver:
     def _object_json(response: httpx.Response) -> dict:
         data = response.json()
         if not isinstance(data, dict):
-            raise ValueError("unexpected GitHub API response")
+            raise TypeError("unexpected GitHub API response")
         return data

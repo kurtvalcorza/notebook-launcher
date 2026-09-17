@@ -1,4 +1,5 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -120,3 +121,66 @@ def test_initialize_migrates_grant_identity_columns_to_text(tmp_path):
     assert columns["root_ino"] == "TEXT"
     assert tuple(row) == ("12", "34", "text", "text")
     assert "ux_one_active_user_data_grant" in indexes
+
+
+def test_claim_session_is_transactional_under_concurrency(state_store):
+    workspace_id = uuid4()
+    now = datetime.now(UTC).isoformat()
+    root = state_store.path.parent / "root"
+    state_store.create_workspace(
+        workspace_id=workspace_id,
+        source_repository_id=1,
+        source_owner="owner",
+        source_repository="repo",
+        source_commit_sha="a" * 40,
+        source_notebook_path="x.ipynb",
+        root_path=root,
+        work_path=root / "work",
+        outputs_path=root / "outputs",
+        active_notebook_path="x.ipynb",
+        now=now,
+    )
+
+    def claim(index):
+        return state_store.claim_session(
+            session_id=uuid4(),
+            workspace_id=workspace_id,
+            runtime_id=f"runtime-{index}",
+            host_port=9000 + index,
+            gpu_enabled=False,
+            agent_mode="write",
+            notebook_url=f"http://127.0.0.1:{9000 + index}",
+            now=now,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(claim, range(8)))
+
+    assert sum(created for _session, created in results) == 1
+    assert len({session.id for session, _created in results}) == 1
+
+
+def test_initialize_adds_backward_compatible_audit_operation_id(tmp_path):
+    state = StateStore(tmp_path / "legacy.db")
+    with state.connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE audit_events (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                lease_id TEXT,
+                operation TEXT NOT NULL,
+                target TEXT,
+                started_at TEXT NOT NULL,
+                duration_ms INTEGER,
+                outcome TEXT,
+                error_type TEXT
+            )
+            """
+        )
+
+    state.initialize()
+
+    with state.connect() as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_events)")}
+    assert "operation_id" in columns
