@@ -108,7 +108,7 @@ def test_run_argv_timeout_stops_descendant_processes(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows job-object regression")
-def test_run_argv_timeout_stops_orphaned_grandchild(tmp_path):
+def test_run_argv_stops_orphaned_grandchild_after_intermediary_exit(tmp_path):
     grandchild_marker = tmp_path / "grandchild-survived"
     intermediary_exited = tmp_path / "intermediary-exited"
     grandchild_code = (
@@ -128,10 +128,11 @@ def test_run_argv_timeout_stops_orphaned_grandchild(tmp_path):
         "time.sleep(10)"
     )
 
-    with pytest.raises(ExecutionTimeout):
+    with pytest.raises(ExecutionCancelled):
         run_argv(
             (sys.executable, "-c", parent_code),
-            timeout_seconds=0.75,
+            cancel_requested=intermediary_exited.exists,
+            timeout_seconds=10,
             terminate_grace_seconds=0.1,
         )
 

@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import threading
 from datetime import UTC, datetime
 from typing import ClassVar
@@ -89,12 +91,16 @@ def make_state(tmp_path):
 def write_private_config(settings, session_id):
     session_dir = settings.runtime_dir / str(session_id)
     session_dir.mkdir()
-    (session_dir / "mcp-private.json").write_text(
+    private_path = session_dir / "mcp-private.json"
+    private_path.write_text(
         json.dumps(
             {"jupyter_url": "http://127.0.0.1:9001", "jupyter_token": "secret"}
         ),
         encoding="utf-8",
     )
+    if os.name != "nt":
+        private_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    return private_path
 
 
 def test_mcp_cli_requires_session_and_accepts_profile():
@@ -171,6 +177,25 @@ def test_stopped_session_invalidates_existing_bridge(tmp_path):
     with pytest.raises(PermissionDenied, match="stopped"):
         context.adapter.inspect_notebook()
     context.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are required")
+def test_resolver_rejects_private_config_with_group_permissions(tmp_path):
+    settings, state = make_state(tmp_path)
+    session_id = insert_ready_session(state)
+    private_path = write_private_config(settings, session_id)
+    assert stat.S_IMODE(private_path.stat().st_mode) == 0o600
+    private_path.chmod(0o640)
+
+    with pytest.raises(SystemExit, match="session_not_ready"):
+        resolve_mcp_bridge(
+            state=state,
+            settings=settings,
+            session_id=session_id,
+            requested_mode="readonly",
+            client_label=None,
+            transport_factory=FakeTransport,
+        )
 
 
 def test_bridge_heartbeats_until_close():
