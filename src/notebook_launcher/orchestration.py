@@ -141,7 +141,13 @@ def run_argv(
     if max_output_bytes <= 0:
         raise ValueError("max_output_bytes must be positive")
 
-    redactions = tuple(value for value in redact_values if value)
+    redactions = tuple(
+        sorted(
+            {value for value in redact_values if value},
+            key=len,
+            reverse=True,
+        )
+    )
     capture_limit = max_output_bytes + max(
         (len(value.encode("utf-8")) for value in redactions),
         default=0,

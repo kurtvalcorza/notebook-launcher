@@ -57,6 +57,22 @@ def test_run_argv_redacts_secret_prefix_at_capture_boundary():
     assert len(result.stdout.encode("utf-8")) <= 32
 
 
+def test_run_argv_redacts_longest_overlapping_secret_first():
+    secret = "private-token-value"
+    result = run_argv(
+        (
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write(sys.argv[1])",
+            secret,
+        ),
+        redact_values=("private-token", secret),
+    )
+
+    assert result.stdout == "[REDACTED]"
+    assert result.argv[-1] == "[REDACTED]"
+
+
 def test_run_argv_times_out():
     with pytest.raises(ExecutionTimeout):
         run_argv(

@@ -7,8 +7,6 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
-from urllib.parse import quote
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
