@@ -37,6 +37,7 @@ packages = ["src/notebook_launcher"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 asyncio_mode = "auto"
 markers = [
   "docker: requires Docker",

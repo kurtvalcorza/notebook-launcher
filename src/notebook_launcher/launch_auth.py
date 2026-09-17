@@ -8,6 +8,8 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from .errors import InvalidLaunchToken, LaunchTokenExpired
+
 
 @dataclass(frozen=True, slots=True)
 class LaunchTokenClaims:
@@ -43,10 +45,10 @@ class LaunchTokenCodec:
         try:
             body, supplied_sig = token.split(".", 1)
         except ValueError as exc:
-            raise ValueError("malformed launch token") from exc
+            raise InvalidLaunchToken() from exc
         expected_sig = self._sign(body.encode())
         if not hmac.compare_digest(supplied_sig, expected_sig):
-            raise ValueError("invalid launch token signature")
+            raise InvalidLaunchToken()
         try:
             payload = json.loads(self._unb64(body))
             jti = str(payload["jti"])
@@ -54,9 +56,9 @@ class LaunchTokenCodec:
             issued_at = int(payload["iat"])
             expires_at = int(payload["exp"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ValueError("invalid launch token payload") from exc
+            raise InvalidLaunchToken() from exc
         if expires_at < int(datetime.now(UTC).timestamp()):
-            raise ValueError("launch token expired")
+            raise LaunchTokenExpired()
         return LaunchTokenClaims(
             jti=jti,
             request_digest=digest,

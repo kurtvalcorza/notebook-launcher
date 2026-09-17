@@ -34,7 +34,10 @@ def test_repo_fields_resolve_stable_repository_id_and_commit():
 
 
 def test_blob_url_prefers_longest_valid_slash_ref():
+    requests = []
+
     def handler(request: httpx.Request):
+        requests.append(request.url.path)
         if request.url.path == "/repos/owner/repo":
             return response(200, {
                 "id": 42,
@@ -46,7 +49,7 @@ def test_blob_url_prefers_longest_valid_slash_ref():
         # httpx exposes URL.path decoded; the resolver still sends the slash-ref
         # as a percent-encoded path segment on the wire.
         if request.url.path.endswith("/commits/feature/demo/notebooks"):
-            return response(404, {})
+            return response(422, {"message": "No commit found for SHA: feature/demo/notebooks"})
         if request.url.path.endswith("/commits/feature/demo"):
             return response(200, {"sha": "c" * 40})
         if request.url.path.endswith("/commits/feature"):
@@ -62,3 +65,8 @@ def test_blob_url_prefers_longest_valid_slash_ref():
     assert resolved.requested_ref == "feature/demo"
     assert resolved.notebook_path == "notebooks/example.ipynb"
     assert resolved.commit_sha == "c" * 40
+    assert requests == [
+        "/repos/owner/repo",
+        "/repos/owner/repo/commits/feature/demo/notebooks",
+        "/repos/owner/repo/commits/feature/demo",
+    ]

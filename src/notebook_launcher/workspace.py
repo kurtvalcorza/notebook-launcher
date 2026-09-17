@@ -35,10 +35,10 @@ def safe_open_under_root(
     mode: int = 0o600,
 ) -> int:
     """Open a path beneath root without following symlinks in any component."""
+    parts = _safe_relative_parts(relative)
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise RuntimeError("safe no-follow path opening is unsupported on this platform")
 
-    parts = _safe_relative_parts(relative)
     canonical = root.resolve(strict=True)
     root_fd = os.open(canonical, os.O_RDONLY | os.O_DIRECTORY)
     current_fd = root_fd

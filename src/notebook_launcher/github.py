@@ -31,17 +31,24 @@ class GitHubResolver:
 
         if request.repo:
             parsed = parse_repo_fields(request.repo, request.ref or "", request.path or "")
+            metadata = self._get_json(
+                f"https://api.github.com/repos/{parsed.owner}/{parsed.repository}"
+            )
+            canonical_owner = metadata["owner"]["login"]
+            canonical_repo = metadata["name"]
+            commit = self._resolve_commit(
+                canonical_owner,
+                canonical_repo,
+                parsed.requested_ref,
+            )
         elif request.url:
-            parsed = self._resolve_blob_url(parse_github_blob_url(request.url))
+            parsed, metadata, commit = self._resolve_blob_url(
+                parse_github_blob_url(request.url)
+            )
+            canonical_owner = metadata["owner"]["login"]
+            canonical_repo = metadata["name"]
         else:
             raise ValueError("GitHub source is required")
-
-        metadata = self._get_json(
-            f"https://api.github.com/repos/{parsed.owner}/{parsed.repository}"
-        )
-        canonical_owner = metadata["owner"]["login"]
-        canonical_repo = metadata["name"]
-        commit = self._resolve_commit(canonical_owner, canonical_repo, parsed.requested_ref)
 
         clone_url = metadata.get("clone_url")
         expected_prefix = "https://github.com/"
@@ -60,7 +67,10 @@ class GitHubResolver:
             resolved_at=datetime.now(UTC),
         )
 
-    def _resolve_blob_url(self, blob: ParsedBlobURL) -> ParsedGitHubSource:
+    def _resolve_blob_url(
+        self,
+        blob: ParsedBlobURL,
+    ) -> tuple[ParsedGitHubSource, dict, dict]:
         metadata = self._get_json(
             f"https://api.github.com/repos/{blob.owner}/{blob.repository}"
         )
@@ -74,12 +84,17 @@ class GitHubResolver:
                 normalized = normalize_notebook_path(path)
             except ValueError:
                 continue
-            if self._commit_exists(owner, repository, ref):
-                return ParsedGitHubSource(
-                    owner=owner,
-                    repository=repository,
-                    requested_ref=ref,
-                    notebook_path=normalized,
+            commit = self._resolve_commit_if_exists(owner, repository, ref)
+            if commit is not None:
+                return (
+                    ParsedGitHubSource(
+                        owner=owner,
+                        repository=repository,
+                        requested_ref=ref,
+                        notebook_path=normalized,
+                    ),
+                    metadata,
+                    commit,
                 )
         raise ValueError("could not resolve GitHub ref/path boundary")
 
@@ -87,12 +102,23 @@ class GitHubResolver:
         encoded = quote(ref, safe="")
         return f"https://api.github.com/repos/{owner}/{repository}/commits/{encoded}"
 
-    def _commit_exists(self, owner: str, repository: str, ref: str) -> bool:
+    def _resolve_commit_if_exists(
+        self,
+        owner: str,
+        repository: str,
+        ref: str,
+    ) -> dict | None:
         response = self.client.get(self._commit_url(owner, repository, ref))
         if response.status_code == 404:
-            return False
+            return None
+        if response.status_code == 422:
+            data = response.json()
+            if isinstance(data, dict) and str(data.get("message", "")).startswith(
+                "No commit found for SHA:"
+            ):
+                return None
         response.raise_for_status()
-        return True
+        return self._object_json(response)
 
     def _resolve_commit(self, owner: str, repository: str, ref: str) -> dict:
         return self._get_json(self._commit_url(owner, repository, ref))
@@ -100,6 +126,10 @@ class GitHubResolver:
     def _get_json(self, url: str) -> dict:
         response = self.client.get(url)
         response.raise_for_status()
+        return self._object_json(response)
+
+    @staticmethod
+    def _object_json(response: httpx.Response) -> dict:
         data = response.json()
         if not isinstance(data, dict):
             raise ValueError("unexpected GitHub API response")

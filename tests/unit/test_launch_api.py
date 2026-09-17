@@ -87,6 +87,7 @@ def test_get_open_is_preview_only(tmp_path: Path):
     with state.connect() as conn:
         assert conn.execute("SELECT count(*) FROM launches").fetchone()[0] == 0
     assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-content-type-options"] == "nosniff"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
 
 
@@ -113,9 +114,46 @@ def test_cross_origin_launch_is_denied_before_launch_record(tmp_path: Path):
         json={"request": launch_request(), "launch_token": token},
         headers={"Origin": "https://evil.example"},
     )
-    assert response.status_code == 403
+    assert response.status_code == 400
     with state.connect() as conn:
         assert conn.execute("SELECT count(*) FROM launches").fetchone()[0] == 0
+
+
+def test_invalid_and_expired_tokens_have_distinct_error_codes(tmp_path: Path):
+    client, _resolver, _state = make_client(tmp_path)
+    invalid = client.post(
+        "/api/launches",
+        json={"request": launch_request(), "launch_token": "invalid"},
+        headers={"Origin": "http://127.0.0.1:8080"},
+    )
+
+    settings = Settings(root=tmp_path / "expired", host="127.0.0.1", port=8080)
+    state = StateStore(settings.state_db)
+    state.initialize()
+    resolver = FakeResolver()
+    codec = LaunchTokenCodec(b"x" * 32, ttl_seconds=-1)
+    services = AppServices(
+        state=state,
+        token_codec=codec,
+        resolver=resolver,
+        starter=StateLaunchStarter(state, settings),
+    )
+    expired_client = TestClient(create_app(settings, services))
+    expired_preview = expired_client.get(
+        "/open",
+        params={"repo": "owner/repo", "ref": "main", "path": "demo.ipynb"},
+    )
+    expired_token = get_token(expired_preview.text)
+    expired = expired_client.post(
+        "/api/launches",
+        json={"request": launch_request(), "launch_token": expired_token},
+        headers={"Origin": "http://127.0.0.1:8080"},
+    )
+
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"]["error"] == "invalid_launch_token"
+    assert expired.status_code == 400
+    assert expired.json()["detail"]["error"] == "launch_token_expired"
 
 
 def test_token_is_bound_to_request(tmp_path: Path):
@@ -132,9 +170,27 @@ def test_token_is_bound_to_request(tmp_path: Path):
         json={"request": modified, "launch_token": token},
         headers={"Origin": "http://127.0.0.1:8080"},
     )
-    assert response.status_code == 403
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "launch_request_changed"
     with state.connect() as conn:
         assert conn.execute("SELECT count(*) FROM launches").fetchone()[0] == 0
+
+
+def test_launch_token_replay_has_contract_error_code(tmp_path: Path):
+    client, _resolver, _state = make_client(tmp_path)
+    preview = client.get(
+        "/open",
+        params={"repo": "owner/repo", "ref": "main", "path": "demo.ipynb"},
+    )
+    token = get_token(preview.text)
+    payload = {"request": launch_request(), "launch_token": token}
+    headers = {"Origin": "http://127.0.0.1:8080"}
+
+    assert client.post("/api/launches", json=payload, headers=headers).status_code == 202
+    replay = client.post("/api/launches", json=payload, headers=headers)
+
+    assert replay.status_code == 400
+    assert replay.json()["detail"]["error"] == "launch_token_replayed"
 
 
 def test_exact_commit_trust_confirmation_is_one_time_and_authorizes_launch(tmp_path: Path):
@@ -148,6 +204,7 @@ def test_exact_commit_trust_confirmation_is_one_time_and_authorizes_launch(tmp_p
     page = client.get(url)
     assert page.status_code == 200
     assert page.headers["x-frame-options"] == "DENY"
+    assert page.headers["x-content-type-options"] == "nosniff"
 
     grant = client.post(
         f"/api/launches/{launch_id}/trust",

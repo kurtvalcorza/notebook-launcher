@@ -46,7 +46,14 @@ def test_grant_persists_canonical_root_and_revokes(tmp_path: Path):
     assert active is not None
     assert active.id == grant.id
     assert active.canonical_root == data.resolve()
+    assert active.root_dev == data.stat().st_dev
+    assert active.root_ino == data.stat().st_ino
     assert active.mode == "rw"
+    with state.connect() as conn:
+        stored_types = conn.execute(
+            "SELECT typeof(root_dev), typeof(root_ino) FROM user_data_grants"
+        ).fetchone()
+    assert tuple(stored_types) == ("text", "text")
     assert store.revoke(workspace_id)
     assert store.active(workspace_id) is None
 

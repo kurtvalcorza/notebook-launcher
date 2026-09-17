@@ -7,7 +7,29 @@ from typing import Iterator
 from uuid import uuid4
 
 
-SCHEMA = """
+USER_DATA_GRANTS_TABLE = """
+CREATE TABLE IF NOT EXISTS user_data_grants (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    display_path TEXT NOT NULL,
+    canonical_root TEXT NOT NULL,
+    root_dev TEXT,
+    root_ino TEXT,
+    container_path TEXT NOT NULL DEFAULT '/mnt/user-data',
+    mode TEXT NOT NULL CHECK (mode IN ('ro','rw')),
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+"""
+
+USER_DATA_GRANTS_ACTIVE_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_one_active_user_data_grant
+ON user_data_grants(workspace_id)
+WHERE revoked_at IS NULL;
+"""
+
+
+SCHEMA = f"""
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 
@@ -120,18 +142,9 @@ CREATE TABLE IF NOT EXISTS document_versions (
     PRIMARY KEY (workspace_id, path)
 );
 
-CREATE TABLE IF NOT EXISTS user_data_grants (
-    id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-    display_path TEXT NOT NULL,
-    canonical_root TEXT NOT NULL,
-    root_dev INTEGER,
-    root_ino INTEGER,
-    container_path TEXT NOT NULL DEFAULT '/mnt/user-data',
-    mode TEXT NOT NULL CHECK (mode IN ('ro','rw')),
-    created_at TEXT NOT NULL,
-    revoked_at TEXT
-);
+{USER_DATA_GRANTS_TABLE}
+
+{USER_DATA_GRANTS_ACTIVE_INDEX}
 
 CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY,
@@ -155,8 +168,9 @@ class StateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
-            self._ensure_column(conn, "user_data_grants", "root_dev", "INTEGER")
-            self._ensure_column(conn, "user_data_grants", "root_ino", "INTEGER")
+            self._ensure_column(conn, "user_data_grants", "root_dev", "TEXT")
+            self._ensure_column(conn, "user_data_grants", "root_ino", "TEXT")
+            self._migrate_user_data_identity_to_text(conn)
 
     @staticmethod
     def _ensure_column(
@@ -168,6 +182,43 @@ class StateStore:
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @staticmethod
+    def _migrate_user_data_identity_to_text(conn: sqlite3.Connection) -> None:
+        columns = {
+            row[1]: row[2].upper()
+            for row in conn.execute("PRAGMA table_info(user_data_grants)")
+        }
+        if columns.get("root_dev") == "TEXT" and columns.get("root_ino") == "TEXT":
+            return
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DROP INDEX IF EXISTS ux_one_active_user_data_grant")
+            conn.execute(
+                "ALTER TABLE user_data_grants RENAME TO user_data_grants_legacy"
+            )
+            conn.execute(USER_DATA_GRANTS_TABLE)
+            conn.execute(
+                """
+                INSERT INTO user_data_grants (
+                    id, workspace_id, display_path, canonical_root,
+                    root_dev, root_ino, container_path, mode, created_at, revoked_at
+                )
+                SELECT
+                    id, workspace_id, display_path, canonical_root,
+                    CAST(root_dev AS TEXT), CAST(root_ino AS TEXT),
+                    container_path, mode, created_at, revoked_at
+                FROM user_data_grants_legacy
+                """
+            )
+            conn.execute("DROP TABLE user_data_grants_legacy")
+            conn.execute(USER_DATA_GRANTS_ACTIVE_INDEX)
+        except Exception:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

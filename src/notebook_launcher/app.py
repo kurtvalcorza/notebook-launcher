@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .config import Settings
+from .errors import LaunchAuthorizationError
 from .github import GitHubResolver
 from .launch_auth import LaunchTokenCodec, request_digest
 from .launches import StateLaunchStarter
@@ -87,7 +88,7 @@ def _is_loopback(host: str | None) -> bool:
 def _check_local_request(request: Request, settings: Settings) -> None:
     client_host = request.client.host if request.client else None
     if not _is_loopback(client_host) and client_host != "testclient":
-        raise HTTPException(status_code=403, detail="local client required")
+        raise HTTPException(status_code=400, detail="local client required")
     origin = request.headers.get("origin")
     if origin is not None:
         allowed = {
@@ -95,7 +96,7 @@ def _check_local_request(request: Request, settings: Settings) -> None:
             f"http://localhost:{settings.port}",
         }
         if origin not in allowed:
-            raise HTTPException(status_code=403, detail="cross-origin request denied")
+            raise HTTPException(status_code=400, detail="cross-origin request denied")
 
 
 def _default_services(settings: Settings) -> AppServices:
@@ -170,6 +171,7 @@ document.getElementById('launch').addEventListener('click',async()=>{{
 </script></body></html>"""
         response = HTMLResponse(body)
         response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -181,16 +183,29 @@ document.getElementById('launch').addEventListener('click',async()=>{{
             source = None if body.request.workspace_id else services.resolver.resolve(body.request)
             digest = _normalized_digest(body.request, source)
             claims = services.token_codec.decode(body.launch_token)
+        except LaunchAuthorizationError as exc:
+            raise HTTPException(
+                status_code=exc.http_status,
+                detail=exc.public_dict(),
+            ) from exc
         except Exception as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not secrets.compare_digest(claims.request_digest, digest):
-            raise HTTPException(status_code=403, detail="launch token request mismatch")
+            error = LaunchAuthorizationError(
+                "launch_request_changed",
+                "The launch request changed; refresh the preview and retry.",
+            )
+            raise HTTPException(status_code=error.http_status, detail=error.public_dict())
         if not services.state.consume_launch_jti(
             jti_hash=services.token_codec.hash_jti(claims.jti),
             request_digest=digest,
             consumed_at=datetime.now(UTC).isoformat(),
         ):
-            raise HTTPException(status_code=409, detail="launch token already used")
+            error = LaunchAuthorizationError(
+                "launch_token_replayed",
+                "The launch authorization token was already used.",
+            )
+            raise HTTPException(status_code=error.http_status, detail=error.public_dict())
         trust_covered = bool(source and trust.find(source).trusted)
         return services.starter.start(
             request=body.request,
@@ -222,6 +237,7 @@ document.getElementById('repository').onclick=()=>grant('repository');
 </script></body></html>"""
         response = HTMLResponse(body)
         response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
         response.headers["Cache-Control"] = "no-store"
         return response
